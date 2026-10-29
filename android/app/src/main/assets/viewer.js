@@ -77,6 +77,7 @@
   var btnKeys   = document.getElementById("bv-btn-keys");
   var btnRotL   = document.getElementById("bv-btn-rotl");
   var btnRotR   = document.getElementById("bv-btn-rotr");
+  var btnMirror = document.getElementById("bv-btn-mirror");
   var elToolbar = document.getElementById("bv-toolbar");
   var elPanelNet = document.getElementById("bv-panel-net");
   var elTabPins = document.getElementById("bv-tab-pins");
@@ -104,9 +105,12 @@
   var showTraces = false;
 
   var layerIdx = -1;       // -1 = ALL, else index into board.layers
+  var userMirror = false;  // user "Mirror" toggle; XORed with the BOTTOM auto-mirror
   var hlNet = -1;          // highlighted net index, -1 = none
   var sel = null;          // {ci, pin}  pin = -1 when whole component
 
+  // view.k is always positive; the horizontal mirror is a signed x scale
+  // (see kxNow) so every world->screen site stays a plain affine map.
   var view = { k: 1, tx: 0, ty: 0, rot: 0 };   // rot = view rotation (radians)
   var cssW = 0, cssH = 0, dpr = Math.max(1, window.devicePixelRatio || 1);
 
@@ -121,6 +125,7 @@
     ctx: null,
     valid: false,
     k: 1, tx: 0, ty: 0,    // view at capture time
+    mirrored: false,       // effective mirror at capture time (sign of kx)
     ox: 0, oy: 0,          // capture-screen CSS coords of the raster's top-left
     dpr: 1,
     cssWdt: 0, cssHgt: 0
@@ -129,10 +134,44 @@
 
   /* ------------------------------------------------------------------ *
    *  View transform   (world y-up -> screen y-down)
-   *    sx = wx * k + tx        sy = -wy * k + ty
+   *    sx = wx * kx + tx       sy = -wy * k + ty
+   *  kx = -k when the effective view is mirrored, else +k. The desktop
+   *  viewer (CanvasCommon._apply_view_transform) shows BOTTOM mirrored
+   *  about the board's x extent "as if the board were flipped over", XOR a
+   *  user Mirror toggle; the mirror happens in world space BEFORE the view
+   *  rotation, which here is still applied at composite time.
    * ------------------------------------------------------------------ */
-  function worldX(sx) { return (sx - view.tx) / view.k; }
+  function isMirrored() { return (layerIdx === 1) !== userMirror; }
+  function kxNow() { return isMirrored() ? -view.k : view.k; }
+  function worldX(sx) { return (sx - view.tx) / kxNow(); }
   function worldY(sy) { return (view.ty - sy) / view.k; }
+
+  // Change the orientation (mirror / layer) while keeping the world point
+  // under the viewport centre fixed: reflect tx about the centre in base
+  // space. The centre is the rotation pivot, so no rotation maths needed.
+  function reorient(mutate) {
+    var cx = cssW / 2;
+    var wx = board ? worldX(cx) : 0;
+    mutate();
+    if (board) view.tx = cx - wx * kxNow();
+    // A finger may be holding/dragging the canvas while another taps the
+    // button: re-anchor the live gesture so its next move continues from
+    // the reflected tx instead of the pre-mirror one (which would fling the
+    // board off-screen). A pinch keeps its centroid world point instead.
+    if (gesture && gesture.type === "pan") {
+      var p = pointers.get(gesture.id);
+      gesture.tx0 = view.tx; gesture.ty0 = view.ty;
+      if (p) { gesture.sx = p.x; gesture.sy = p.y; }
+    } else if (gesture && gesture.type === "pinch" && pointers.size >= 2) {
+      var pts = [];
+      pointers.forEach(function (q) { pts.push(q); });
+      var bc = screenToBase((pts[0].x + pts[1].x) / 2, (pts[0].y + pts[1].y) / 2);
+      gesture.wfx = worldX(bc.x); gesture.wfy = worldY(bc.y);
+    }
+    needRaster = true;
+    updateButtons();
+    scheduleRender();
+  }
 
   // --- rotation helpers ---------------------------------------------------
   // The world->base-screen transform above is rotation-free; a final
@@ -162,7 +201,7 @@
     var wx = worldX(b.x), wy = worldY(b.y);
     var k2 = clampK(view.k * factor);
     view.k = k2;
-    view.tx = b.x - wx * k2;
+    view.tx = b.x - wx * kxNow();
     view.ty = b.y + wy * k2;
     scheduleRender();
   }
@@ -187,17 +226,24 @@
     var k = Math.min(aw / rw, ah / rh);
     view.k = clampK(k);
     var cx = (bb[0] + bb[2]) / 2, cy = (bb[1] + bb[3]) / 2;
-    view.tx = ins.l + aw / 2 - cx * view.k;
-    view.ty = ins.t + ah / 2 + cy * view.k;
+    placeWorldAt(cx, cy, ins.l + aw / 2, ins.t + ah / 2);
     needRaster = true;
     scheduleRender();
+  }
+
+  // Put world point (wx, wy) under FINAL screen point (sx, sy). The view
+  // rotation is applied about the viewport centre at composite time, so the
+  // base-space target is the inverse-rotated screen point.
+  function placeWorldAt(wx, wy, sx, sy) {
+    var b = screenToBase(sx, sy);
+    view.tx = b.x - wx * kxNow();
+    view.ty = b.y + wy * view.k;
   }
 
   function centerOn(wx, wy, k) {
     if (k) view.k = clampK(k);
     var scy = elPanel.classList.contains("open") ? cssH * 0.38 : cssH * 0.5;
-    view.tx = cssW / 2 - wx * view.k;
-    view.ty = scy + wy * view.k;
+    placeWorldAt(wx, wy, cssW / 2, scy);
     needRaster = true;
     scheduleRender();
   }
@@ -442,6 +488,7 @@
       hlNet = -1;
       sel = null;
       layerIdx = -1;
+      userMirror = false;
       view.rot = 0;
       closePanel();
       updateChip();
@@ -578,6 +625,7 @@
       raster.canvas.height = ph;
     }
     raster.k = view.k; raster.tx = view.tx; raster.ty = view.ty;
+    raster.mirrored = isMirrored();
     raster.ox = -marginX; raster.oy = -marginY;
     raster.dpr = rDpr;
     raster.cssWdt = rw; raster.cssHgt = rh;
@@ -588,13 +636,15 @@
     // map capture-screen CSS coords -> raster pixels
     g.setTransform(rDpr, 0, 0, rDpr, marginX * rDpr, marginY * rDpr);
 
-    var k = view.k, tx = view.tx, ty = view.ty;
+    // k scales sizes (always > 0); kx is the signed x scale (mirror).
+    var k = view.k, kx = kxNow(), tx = view.tx, ty = view.ty;
     var L = -marginX, T = -marginY, R = cssW + marginX, B = cssH + marginY;
 
     // --- board substrate ---
     var bb = board.bbox;
-    var bx = bb[0] * k + tx, by = -bb[3] * k + ty;
-    var bw = (bb[2] - bb[0]) * k, bh = (bb[3] - bb[1]) * k;
+    var bx = bb[0] * kx + tx, by = -bb[3] * k + ty;
+    var bw = (bb[2] - bb[0]) * kx, bh = (bb[3] - bb[1]) * k;
+    if (bw < 0) { bx += bw; bw = -bw; }
     g.fillStyle = BOARD_FILL;
     g.fillRect(bx, by, bw, bh);
     g.strokeStyle = BOARD_EDGE;
@@ -612,8 +662,8 @@
         if (dimming && t.net[i] === hlNet) continue; // bright pass below
         if (layerIdx >= 0 && li !== layerIdx) continue;
         // cull
-        var ax = t.x1[i] * k + tx, ay = -t.y1[i] * k + ty;
-        var bx2 = t.x2[i] * k + tx, by2 = -t.y2[i] * k + ty;
+        var ax = t.x1[i] * kx + tx, ay = -t.y1[i] * k + ty;
+        var bx2 = t.x2[i] * kx + tx, by2 = -t.y2[i] * k + ty;
         if ((ax < L && bx2 < L) || (ax > R && bx2 > R) ||
             (ay < T && by2 < T) || (ay > B && by2 > B)) continue;
         var wpx = t.width[i] * k;
@@ -635,8 +685,8 @@
         g.beginPath();
         for (var q = 0; q < idxs.length; q++) {
           var s = idxs[q];
-          g.moveTo(t.x1[s] * k + tx, -t.y1[s] * k + ty);
-          g.lineTo(t.x2[s] * k + tx, -t.y2[s] * k + ty);
+          g.moveTo(t.x1[s] * kx + tx, -t.y1[s] * k + ty);
+          g.lineTo(t.x2[s] * kx + tx, -t.y2[s] * k + ty);
         }
         g.stroke();
       }
@@ -649,8 +699,8 @@
         var hw = 0, anyHl = false;
         for (q = 0; q < hlIdx.length; q++) {
           s = hlIdx[q];
-          ax = t.x1[s] * k + tx; ay = -t.y1[s] * k + ty;
-          bx2 = t.x2[s] * k + tx; by2 = -t.y2[s] * k + ty;
+          ax = t.x1[s] * kx + tx; ay = -t.y1[s] * k + ty;
+          bx2 = t.x2[s] * kx + tx; by2 = -t.y2[s] * k + ty;
           if ((ax < L && bx2 < L) || (ax > R && bx2 > R) ||
               (ay < T && by2 < T) || (ay > B && by2 > B)) continue;
           var w2 = t.width[s] * k * 1.2;
@@ -673,7 +723,7 @@
         g.globalAlpha = dimming ? DIM_ALPHA : 0.9;
         for (i = 0; i < t.nVias; i++) {
           if (dimming && t.viaNet[i] === hlNet) continue;
-          var vx = t.viaX[i] * k + tx, vy = -t.viaY[i] * k + ty;
+          var vx = t.viaX[i] * kx + tx, vy = -t.viaY[i] * k + ty;
           if (vx < L || vx > R || vy < T || vy > B) continue;
           g.beginPath();
           g.arc(vx, vy, vr, 0, 6.2832);
@@ -685,7 +735,7 @@
           var hlVias = t.viasByNet ? t.viasByNet[hlNet] : null;
           for (q = 0; hlVias && q < hlVias.length; q++) {
             i = hlVias[q];
-            vx = t.viaX[i] * k + tx; vy = -t.viaY[i] * k + ty;
+            vx = t.viaX[i] * kx + tx; vy = -t.viaY[i] * k + ty;
             if (vx < L || vx > R || vy < T || vy > B) continue;
             g.beginPath();
             g.arc(vx, vy, vr + 1, 0, 6.2832);
@@ -711,7 +761,7 @@
         ghost = (layerIdx >= 0 && c.layer !== layerIdx);
       }
       if (dimming && pn[i] === hlNet) continue;    // bright pass below
-      var sx = px[i] * k + tx, sy = -py[i] * k + ty;
+      var sx = px[i] * kx + tx, sy = -py[i] * k + ty;
       if (sx < L || sx > R || sy < T || sy > B) continue;
       var a = ghost ? 0.15 : 0.85;
       if (dimming) a *= DIM_ALPHA;
@@ -739,7 +789,7 @@
           if (r < 1.4) r = 1.4;
           if (r > 9) r = 9;
         }
-        sx = px[i] * k + tx; sy = -py[i] * k + ty;
+        sx = px[i] * kx + tx; sy = -py[i] * k + ty;
         if (sx < L || sx > R || sy < T || sy > B) continue;
         g.beginPath();
         g.arc(sx, sy, r, 0, 6.2832);
@@ -750,7 +800,7 @@
     // Component outlines and refdes are static for a settled view. Capture
     // them above pins, matching the old live draw order, so gesture frames
     // only composite this raster and the current selection overlay.
-    drawComponents(g, k, tx, ty, L, T, R, B);
+    drawComponents(g, k, kx, tx, ty, L, T, R, B);
 
     raster.valid = true;
     needRaster = false;
@@ -772,7 +822,11 @@
     if (!dirty) return;
     dirty = false;
 
-    if (needRaster && !gestureActive) rasterize();
+    // A raster captured with the other mirror sign can never be blitted
+    // into place (the delta transform assumes K > 0), so re-capture it even
+    // mid-gesture (e.g. a Mirror tap inside the wheel-zoom settle window).
+    if ((needRaster && !gestureActive) ||
+        (raster.valid && raster.mirrored !== isMirrored())) rasterize();
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = BG;
@@ -799,7 +853,8 @@
       ctx.translate(-rcx, -rcy);
     }
 
-    // blit static raster with the delta transform
+    // blit static raster with the delta transform (same mirror sign as the
+    // capture, so K is a positive scalar and only k/tx/ty differ)
     if (raster.valid) {
       var K = view.k / raster.k;
       var ox = (raster.ox - raster.tx) * K + view.tx;
@@ -814,13 +869,25 @@
     ctx.restore();
   }
 
-  function drawComponents(g, k, tx, ty, L, T, R, B) {
+  // Screen rect of a component bbox, normalised so w >= 0 even when the x
+  // scale is negative (mirrored view). Writes into `out` to avoid garbage.
+  function compRect(bb, k, kx, tx, ty, out) {
+    var x = bb[0] * kx + tx, w = (bb[2] - bb[0]) * kx;
+    if (w < 0) { x += w; w = -w; }
+    out.x = x; out.w = w;
+    out.y = -bb[3] * k + ty; out.h = (bb[3] - bb[1]) * k;
+    return out;
+  }
+  var _rect = { x: 0, y: 0, w: 0, h: 0 };
+
+  function drawComponents(g, k, kx, tx, ty, L, T, R, B) {
     var comps = board.comps;
     var n = comps.length;
     var dimming = (hlNet >= 0);
     var labelBudget = 400;
     var labelFlags = new Uint8Array(n);
     var lastFont = 0;
+    var rc = _rect;
     g.textAlign = "center";
     g.textBaseline = "middle";
     g.lineWidth = 1;
@@ -829,9 +896,8 @@
     // remaining budget to the capture margin used during gestures.
     for (var i = 0; i < n; i++) {
       var c = comps[i];
-      var bb = c.bbox;
-      var x = bb[0] * k + tx, y = -bb[3] * k + ty;
-      var w = (bb[2] - bb[0]) * k, h = (bb[3] - bb[1]) * k;
+      compRect(c.bbox, k, kx, tx, ty, rc);
+      var x = rc.x, y = rc.y, w = rc.w, h = rc.h;
       if (x > cssW || y > cssH || x + w < 0 || y + h < 0) continue;
       var ghost = (layerIdx >= 0 && c.layer !== layerIdx);
       if (!ghost && (w > h ? w : h) >= LABEL_MIN_PX) {
@@ -842,9 +908,8 @@
     if (labelBudget > 0) {
       for (i = 0; i < n; i++) {
         c = comps[i];
-        bb = c.bbox;
-        x = bb[0] * k + tx; y = -bb[3] * k + ty;
-        w = (bb[2] - bb[0]) * k; h = (bb[3] - bb[1]) * k;
+        compRect(c.bbox, k, kx, tx, ty, rc);
+        x = rc.x; y = rc.y; w = rc.w; h = rc.h;
         if (x <= cssW && y <= cssH && x + w >= 0 && y + h >= 0) continue;
         if (x > R || y > B || x + w < L || y + h < T) continue;
         ghost = (layerIdx >= 0 && c.layer !== layerIdx);
@@ -857,9 +922,8 @@
 
     for (i = 0; i < n; i++) {
       c = comps[i];
-      bb = c.bbox;
-      x = bb[0] * k + tx; y = -bb[3] * k + ty;
-      w = (bb[2] - bb[0]) * k; h = (bb[3] - bb[1]) * k;
+      compRect(c.bbox, k, kx, tx, ty, rc);
+      x = rc.x; y = rc.y; w = rc.w; h = rc.h;
       if (x > R || y > B || x + w < L || y + h < T) continue;
       var sizePx = w > h ? w : h;
       if (sizePx < 2.5) continue;
@@ -872,9 +936,9 @@
       var ol = c.outline;
       if (ol && ol.length > 2 && sizePx > 6) {
         g.beginPath();
-        g.moveTo(ol[0][0] * k + tx, -ol[0][1] * k + ty);
+        g.moveTo(ol[0][0] * kx + tx, -ol[0][1] * k + ty);
         for (var j = 1; j < ol.length; j++) {
-          g.lineTo(ol[j][0] * k + tx, -ol[j][1] * k + ty);
+          g.lineTo(ol[j][0] * kx + tx, -ol[j][1] * k + ty);
         }
         g.closePath();
         g.stroke();
@@ -903,18 +967,17 @@
     if (!sel || !board) return;
     var c = board.comps[sel.ci];
     if (!c) return;
-    var k = view.k, tx = view.tx, ty = view.ty;
-    var bb = c.bbox;
-    var x = bb[0] * k + tx, y = -bb[3] * k + ty;
-    var w = (bb[2] - bb[0]) * k, h = (bb[3] - bb[1]) * k;
+    var k = view.k, kx = kxNow(), tx = view.tx, ty = view.ty;
+    var rc = compRect(c.bbox, k, kx, tx, ty, _rect);
+    var x = rc.x, y = rc.y, w = rc.w, h = rc.h;
     ctx.strokeStyle = SELECTED_OUTLINE;
     ctx.lineWidth = 2;
     var ol = c.outline;
     if (ol && ol.length > 2) {
       ctx.beginPath();
-      ctx.moveTo(ol[0][0] * k + tx, -ol[0][1] * k + ty);
+      ctx.moveTo(ol[0][0] * kx + tx, -ol[0][1] * k + ty);
       for (var j = 1; j < ol.length; j++) {
-        ctx.lineTo(ol[j][0] * k + tx, -ol[j][1] * k + ty);
+        ctx.lineTo(ol[j][0] * kx + tx, -ol[j][1] * k + ty);
       }
       ctx.closePath();
       ctx.stroke();
@@ -932,7 +995,7 @@
     // selected pin marker
     if (sel.pin >= 0 && sel.pin < c.pinCount) {
       var pi = c.pinStart + sel.pin;
-      var sx = board.pinX[pi] * k + tx, sy = -board.pinY[pi] * k + ty;
+      var sx = board.pinX[pi] * kx + tx, sy = -board.pinY[pi] * k + ty;
       var r = Math.max(3, Math.min(c.pitch * 0.32 * k, 10));
       ctx.fillStyle = SELECTED_PIN_COLOR;
       ctx.beginPath();
@@ -963,9 +1026,21 @@
     return inside;
   }
 
+  // At a TOP/BOTTOM view, parts on the other layer are only ghosted, so a
+  // tap prefers the visible layer (as the desktop's _find_component_at /
+  // _find_any_pin_at do) and falls back to ghosts only when nothing on the
+  // visible layer is hit. ALL and inner-layer views (every part is a ghost
+  // there) take any layer.
   function hitTest(sx, sy) {
     var b = screenToBase(sx, sy);
     var wx = worldX(b.x), wy = worldY(b.y);
+    if (layerIdx === 0 || layerIdx === 1) {
+      return hitTestWorld(wx, wy, layerIdx) || hitTestWorld(wx, wy, -1);
+    }
+    return hitTestWorld(wx, wy, -1);
+  }
+
+  function hitTestWorld(wx, wy, onlyLayer) {
     var radW = TAP_RADIUS_CSS / view.k;
     var rad2 = radW * radW;
 
@@ -985,6 +1060,7 @@
     for (var oi = lo; oi < order.length; oi++) {
       i = order[oi];
       if (px[i] > maxX) break;
+      if (onlyLayer >= 0 && board.comps[board.pinComp[i]].layer !== onlyLayer) continue;
       var dx = px[i] - wx, dy = py[i] - wy;
       var d2 = dx * dx + dy * dy;
       if (d2 < bestD2 || (bestPin >= 0 && d2 === bestD2 && i < bestPin)) {
@@ -1005,6 +1081,7 @@
     var bestCi = -1, bestArea = Infinity;
     var comps = board.comps;
     for (i = 0; i < comps.length; i++) {
+      if (onlyLayer >= 0 && comps[i].layer !== onlyLayer) continue;
       var bb = comps[i].bbox;
       if (wx < bb[0] - radW || wx > bb[2] + radW ||
           wy < bb[1] - radW || wy > bb[3] + radW) continue;
@@ -1048,7 +1125,14 @@
     return board.nets[idx];
   }
 
-  function selectComp(ci, pin, center, focusNet) {
+  // tab: "net"  -> highlight the pin's net (no-op when it is already the
+  //                highlighted net) and show the Net tab; falls back to
+  //                "pins" when the pin has no net.
+  //      "pins" -> show the Pins tab, leave the highlight alone.
+  // Canvas taps pass "net" for a pin hit and "pins" for a body hit; Net-tab
+  // row taps pass "net" so the Net list stays visible while jumping between
+  // members; search and the dev hook pass "pins".
+  function selectComp(ci, pin, center, tab) {
     sel = { ci: ci, pin: (pin == null ? -1 : pin) };
     var c = board.comps[ci];
     elPanelRef.textContent = c.ref;
@@ -1056,21 +1140,32 @@
     elPanelMeta.textContent = c.pinCount + " pin" + (c.pinCount === 1 ? "" : "s") +
       "  ·  " + lay +
       (c.rotation ? "  ·  " + c.rotation + "°" : "");
-    // Tapping a pin reveals its net in the Net tab; tapping a body stays on Pins.
     var pinNet = (sel.pin >= 0) ? board.pinNet[c.pinStart + sel.pin] : -1;
-    if (focusNet && pinNet >= 0) {
+    var wantNet = (tab === "net" && pinNet >= 0);
+    if (wantNet) {
       // The panel is rebuilt once below with the new highlight state.
       setHighlight(pinNet, false);
     }
     buildPinRows(c);
     buildNetTab(hlNet);
-    showTab(focusNet && pinNet >= 0 ? "net" : "pins");
+    showTab(wantNet ? "net" : "pins");
+    if (wantNet && elPanelNet) {
+      var selRow = elPanelNet.querySelector(".bv-netrow.sel");
+      if (selRow && selRow.scrollIntoView) {
+        try { selRow.scrollIntoView({ block: "nearest" }); } catch (e) { /* ok */ }
+      }
+    }
     elPanel.classList.add("open");
     if (center) {
       var bb = c.bbox;
       var maxDim = Math.max(bb[2] - bb[0], bb[3] - bb[1], board.pitch * 2);
       var kTarget = Math.max(view.k, 120 / maxDim);
-      centerOn((bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2, clampK(kTarget));
+      if (sel.pin >= 0 && sel.pin < c.pinCount) {
+        var pi = c.pinStart + sel.pin;
+        centerOn(board.pinX[pi], board.pinY[pi], clampK(kTarget));
+      } else {
+        centerOn((bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2, clampK(kTarget));
+      }
     }
     scheduleRender();
   }
@@ -1149,8 +1244,7 @@
     head.appendChild(hn); head.appendChild(hm);
     frag.appendChild(head);
     var nRows = Math.min(members.length, MAX_NET_ROWS);
-    for (i = 0; i < nRows; i++) {
-      var pi = members[i];
+    function netRow(pi) {
       var ci = board.pinComp[pi];
       var c = board.comps[ci];
       var local = pi - c.pinStart;
@@ -1168,13 +1262,30 @@
       rp.className = "bv-netpin";
       rp.textContent = pname;
       row.appendChild(rr); row.appendChild(rp);
-      frag.appendChild(row);
+      return row;
     }
-    if (members.length > nRows) {
+    function moreRow(count) {
       var more = document.createElement("div");
       more.className = "bv-netrow more";
-      more.textContent = "… " + (members.length - nRows) + " more";
-      frag.appendChild(more);
+      more.textContent = "… " + count + " more";
+      return more;
+    }
+    for (i = 0; i < nRows; i++) frag.appendChild(netRow(members[i]));
+    if (members.length > nRows) {
+      // On a huge net (GND) the selected member may sit past the row cap:
+      // still render it, in sequence, so the .sel row exists and can be
+      // scrolled into view.
+      var selIdx = -1;
+      if (sel && sel.pin >= 0) {
+        selIdx = members.indexOf(board.comps[sel.ci].pinStart + sel.pin);
+      }
+      if (selIdx >= nRows) {
+        if (selIdx > nRows) frag.appendChild(moreRow(selIdx - nRows));
+        frag.appendChild(netRow(members[selIdx]));
+        if (selIdx + 1 < members.length) frag.appendChild(moreRow(members.length - selIdx - 1));
+      } else {
+        frag.appendChild(moreRow(members.length - nRows));
+      }
     }
     elPanelNet.appendChild(frag);
   }
@@ -1185,7 +1296,8 @@
   if (elPanelNet) elPanelNet.addEventListener("click", function (e) {
     var row = e.target.closest ? e.target.closest(".bv-netrow") : null;
     if (!row || row.dataset.ci == null) return;
-    selectComp(row.dataset.ci | 0, row.dataset.pin | 0, true, false);
+    // Jump to the member but stay on the Net tab (hlNet is unchanged).
+    selectComp(row.dataset.ci | 0, row.dataset.pin | 0, true, "net");
   });
 
   elPanelPins.addEventListener("click", function (e) {
@@ -1361,7 +1473,7 @@
       view.rot = rot2;
       // keep the world point under the centroid fixed under the new transform
       var ub = rotAboutCenter(cx, cy, -rot2);
-      view.tx = ub.x - gesture.wfx * k2;
+      view.tx = ub.x - gesture.wfx * kxNow();
       view.ty = ub.y + gesture.wfy * k2;
       scheduleRender();
     } else if (gesture.type === "pan" && e.pointerId === gesture.id) {
@@ -1428,7 +1540,8 @@
     lastTapY = y;
     var hit = hitTest(x, y);
     if (hit) {
-      selectComp(hit.ci, hit.pin, false, hit.pin >= 0);
+      // pin tap -> Net tab (highlighting its net); body tap -> Pins tab
+      selectComp(hit.ci, hit.pin, false, hit.pin >= 0 ? "net" : "pins");
     } else {
       sel = null;
       closePanel();
@@ -1505,10 +1618,16 @@
 
   btnLayer.addEventListener("click", function () {
     if (!board) return;
-    layerIdx = (layerIdx + 2) % (board.layers.length + 1) - 1;  // -1,0,1,...,n-1,-1
-    updateButtons();
-    needRaster = true;
-    scheduleRender();
+    // Cycling into/out of BOTTOM (index 1) flips the effective mirror, so
+    // go through reorient() to keep the centre world point in place.
+    reorient(function () {
+      layerIdx = (layerIdx + 2) % (board.layers.length + 1) - 1;  // -1,0,1,...,n-1,-1
+    });
+  });
+
+  if (btnMirror) btnMirror.addEventListener("click", function () {
+    if (!board) return;
+    reorient(function () { userMirror = !userMirror; });
   });
 
   btnTraces.addEventListener("click", function () {
@@ -1544,6 +1663,16 @@
       btnLayer.classList.add("on");
     }
     btnTraces.classList.toggle("on", showTraces);
+    if (btnMirror) {
+      // .on reflects the EFFECTIVE mirror (BOTTOM auto-mirror XOR user toggle)
+      var mir = isMirrored();
+      btnMirror.classList.toggle("on", mir);
+      btnMirror.title = (layerIdx === 1)
+        ? (userMirror ? "BOTTOM un-mirrored by you — tap to show it flipped again"
+                      : "BOTTOM is shown mirrored (as if the board were flipped over) — tap to un-mirror")
+        : (userMirror ? "View mirrored — tap to restore"
+                      : "Mirror the view horizontally (BOTTOM auto-mirrors)");
+    }
   }
 
   /* ------------------------------------------------------------------ *
@@ -1599,7 +1728,7 @@
     var hitEnt = exact || prefix;
     if (!hitEnt) { showToast("No match: " + value); return; }
     if (hitEnt.type === "comp") {
-      selectComp(hitEnt.idx, -1, true);
+      selectComp(hitEnt.idx, -1, true, "pins");
     } else {
       setHighlight(hitEnt.idx, false);
       centerNet(hitEnt.idx);
@@ -1671,6 +1800,20 @@
       elErrlog.textContent += "[promise] " + (e.reason && e.reason.message || e.reason) + "\n";
     });
 
+    // Read-only view probe for scripted desktop tests (dev harness only —
+    // never installed when window.Android exists). No setters.
+    window.bv.devView = function () {
+      return {
+        k: view.k, kx: kxNow(), tx: view.tx, ty: view.ty, rot: view.rot,
+        layerIdx: layerIdx, userMirror: userMirror, mirrored: isMirrored(),
+        sel: sel ? { ci: sel.ci, pin: sel.pin } : null, hlNet: hlNet,
+        activeTab: activeTab,
+        w2s: function (wx, wy) {           // world -> final screen (CSS px), live view
+          return rotAboutCenter(wx * kxNow() + view.tx, -wy * view.k + view.ty, view.rot);
+        }
+      };
+    };
+
     // silently try a sibling sample.json (dev convenience; never shipped)
     try {
       fetch("./sample.json").then(function (r) {
@@ -1683,19 +1826,20 @@
 
   // scripted states for headless screenshot testing:
   //   viewer.html?test=select  — select biggest comp + highlight one of its nets
-  //   viewer.html?test=layer   — cycle to BOTTOM layer with traces shown
+  //   viewer.html?test=layer   — cycle to BOTTOM layer (auto-mirrored) with traces shown
+  //   viewer.html?test=mirror  — ALL layers + user Mirror on, traces shown
   function maybeRunDevTest() {
     if (hasAndroid) return;
     var m = /[?&]test=(\w+)/.exec(location.search);
     if (!m) return;
-    if (m[1] === "layer") {
+    if (m[1] === "layer" || m[1] === "mirror") {
       setTimeout(function () {
         if (!board) return;
-        layerIdx = Math.min(1, board.layers.length - 1);
-        if (tracesLoaded) showTraces = true;
-        updateButtons();
-        needRaster = true;
-        scheduleRender();
+        reorient(function () {
+          if (m[1] === "layer") layerIdx = Math.min(1, board.layers.length - 1);
+          else userMirror = true;
+          if (tracesLoaded) showTraces = true;
+        });
       }, 120);
       return;
     }
@@ -1706,7 +1850,7 @@
       for (var i = 1; i < board.comps.length; i++) {
         if (board.comps[i].pinCount > board.comps[best].pinCount) best = i;
       }
-      selectComp(best, 0, true);
+      selectComp(best, 0, true, "pins");
       var c = board.comps[best];
       for (i = 0; i < c.pinCount; i++) {
         var net = board.pinNet[c.pinStart + i];

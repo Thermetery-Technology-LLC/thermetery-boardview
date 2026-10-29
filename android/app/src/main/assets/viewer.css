@@ -68,9 +68,9 @@ html, body {
 
 #bv-toolbar button {
   flex: 0 0 auto;
-  min-width: 52px;
+  min-width: 48px;            /* Open … Mirror fit a 375 px strip without scrolling */
   height: 34px;
-  padding: 0 10px;
+  padding: 0 8px;
   border: 1px solid var(--bar-border);
   border-radius: 6px;
   background: #1a2040;
@@ -89,6 +89,8 @@ html, body {
 
 #bv-toolbar button:active { background: #2a3460; }
 
+/* .on = active state (Traces shown, a layer filter, the EFFECTIVE view
+   mirror — BOTTOM auto-mirror XOR the user's Mirror toggle). */
 #bv-toolbar button.on {
   border-color: var(--accent);
   color: var(--accent);
@@ -283,6 +285,7 @@ html, body {
   padding: 7px 14px;
   border-bottom: 1px solid rgba(42, 48, 82, 0.5);
   cursor: pointer;
+  scroll-margin-top: 40px;    /* keep scrollIntoView'd .sel rows clear of the sticky header */
 }
 
 .bv-netrow:active { background: #1a2040; }
