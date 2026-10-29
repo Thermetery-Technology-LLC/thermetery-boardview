@@ -31,7 +31,8 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import tkinter as tk
 
 from .parsers.boardview import BoardModel, Component
-from .units import MILS_PER_MM, units_per_mm_for_span
+from .units import (MILS_PER_MM, shape_outline_bbox, shape_pin_pitch,
+                    units_per_mm_for_span)
 
 # Optional Skia + numpy stack for fast trace rendering. The trace layer
 # can have 40 k+ segments; tk.Canvas's per-line round-trip makes that
@@ -203,6 +204,37 @@ class CanvasCommon:
     DRAG_THRESHOLD_PX = 3
     CLICK_RADIUS_PX = 18
     PIN_CLICK_RADIUS_PX = 10
+    # Screen-space tolerance for the component pick: a click within this
+    # many px of a component outline edge still counts as inside, so
+    # slim chip passives are selectable at any zoom without having to
+    # land on the refdes label.
+    NEAR_MISS_PX = 6.0
+    # "Always show pads" overlay (View menu / P key / Pads toolbar
+    # toggle). Pin dots for every component on the viewed outer layer,
+    # so a pad can be picked with a single click instead of component-
+    # then-pin. Slightly dimmer than the selected component's pins so
+    # those still read as the active set.
+    ALL_PINS_COLOR = "#c9c96e"
+    # Zoom gate: skip the overlay while the layer's median pin pitch is
+    # under this many screen px — the dots would be an unreadable smear
+    # (and, on the tk tier, tens of thousands of canvas items). The same
+    # threshold is applied per component: a part whose own pitch is
+    # below it on screen (a fine-pitch BGA at a zoom where the passives
+    # resolve) is neither drawn nor clickable, so a click can't pick an
+    # arbitrary pad out of a blob.
+    ALL_PINS_MIN_PITCH_PX = 3.0
+    # Item budget: pins the overlay may draw per frame. The tk tier
+    # creates one canvas item per pin and tk then paints each one
+    # (~3 us to create + ~9 us to paint, measured on a 150 % DPI
+    # desktop), so ~4k pins keep a full redraw near the 60 ms a
+    # drag-pan tolerates. When more resolvable pins than that are in
+    # the viewport the budget goes to the parts with the fewest pins
+    # first (passives, connectors) and the big BGAs are left out until
+    # the user zooms into them — see `_overlay_budget` — so the overlay
+    # never flips off wholesale the moment a BGA's pitch resolves. The
+    # GL tier draws one drawPoints per footprint and raises this so it
+    # effectively never limits (BoardCanvasGL.ALL_PINS_MAX_VISIBLE).
+    ALL_PINS_MAX_VISIBLE = 4_000
 
     # ---- Measurement tool -----------------------------------------------
 
@@ -393,13 +425,14 @@ class CanvasCommon:
         # Adding another 10% here ON TOP (and using max(extent_x, extent_y)
         # for both axes) used to inflate the short axis of elongated chips
         # like DDR4 by ~5× — exactly the same bug class I just fixed in
-        # the parser. Use a tiny floor padding (5 units) so a degenerate
-        # rectangle still has area to draw.
-        pad = 5
-        x0 -= pad
-        y0 -= pad
-        x1 += pad
-        y1 += pad
+        # the parser. The pad rule lives in units.shape_outline_bbox
+        # (shared with board_export so Android matches): a 5-unit floor,
+        # plus any axis thinner than ~0.6 × the shape's min pin pitch is
+        # grown to that — TVW 0402/0603 pins sit on one axis, so their
+        # bbox is zero wide and the old fixed pad drew a 0.0025 mm sliver
+        # nobody could see or click. Memoised on the shape object.
+        x0, y0, x1, y1 = shape_outline_bbox(
+            shape, self.units_per_mm(), bbox=(x0, y0, x1, y1))
         corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
         theta = math.radians(c.rotation)
         ct, st = math.cos(theta), math.sin(theta)
@@ -478,7 +511,13 @@ class CanvasCommon:
 
     def _find_via_at(self, cx: int, cy: int) -> Optional[Any]:
         """Hit-test the click against rendered vias. Returns the closest
-        Via within VIA_CLICK_RADIUS_PX, or None.
+        Via within VIA_CLICK_RADIUS_PX, or None."""
+        return self._nearest_via(cx, cy)[0]
+
+
+    def _nearest_via(self, cx: int, cy: int) -> Tuple[Optional[Any], float]:
+        """(closest Via within VIA_CLICK_RADIUS_PX or None, its screen
+        distance in px).
 
         Gated on `show_traces`: vias aren't drawn when traces are off,
         so they shouldn't be clickable either. Synthetic ratsnest
@@ -488,14 +527,15 @@ class CanvasCommon:
         is cheap enough (a few thousand subtractions and a single sqrt
         per visible via) that it stays well under 1 ms even on a
         Z490 with 9 k vias. Skipping cull keeps the code small."""
+        none = (None, float("inf"))
         if not self._show_traces:
-            return None
+            return none
         topo = getattr(self.board, "topology", None)
         if topo is None:
-            return None
+            return none
         vias = getattr(topo, "vias", None) or []
         if not vias:
-            return None
+            return none
         w, h = self.winfo_width(), self.winfo_height()
         r = self.VIA_CLICK_RADIUS_PX
         r2 = r * r
@@ -511,7 +551,33 @@ class CanvasCommon:
             if d2 < best_d2:
                 best_d2 = d2
                 best = v
-        return best
+        if best is None:
+            return none
+        return best, best_d2 ** 0.5
+
+
+    def _click_via_or_pad(self, cx: int, cy: int) -> bool:
+        """First stage of `_handle_click` on both tiers: the via
+        punch-through and the all-pins one-click pad pick.
+
+        Vias win over component selection because they are small
+        targets and clicking near one is almost always intentional (the
+        user wants to "punch through" to the other layer). With the
+        all-pins overlay on, a pad is just as small and deliberate a
+        target, and on dense boards fan-out / via-in-pad vias sit
+        within a few px of pads — so when both are within their click
+        radius the CLOSER one wins rather than the via unconditionally
+        flipping the layer out from under a pad click. Returns True
+        when the click was consumed."""
+        via, via_d = self._nearest_via(cx, cy)
+        pad = self._find_any_pin_hit(cx, cy) if self._show_all_pins else None
+        if pad is not None and (via is None or pad[2] <= via_d):
+            self._select_any_pin(pad[0], pad[1])
+            return True
+        if via is not None:
+            self._flip_layer_for_via(via)
+            return True
+        return False
 
 
     def _flip_layer_for_via(self, via: Any) -> None:
@@ -553,6 +619,336 @@ class CanvasCommon:
         return best_pin
 
 
+    # ---- "Always show pads" overlay -------------------------------------
+
+    @property
+    def show_all_pins(self) -> bool:
+        return getattr(self, "_show_all_pins", False)
+
+
+    def set_show_all_pins(self, on: bool) -> None:
+        """Enable/disable the all-pins overlay. A user setting (the app
+        persists it), so `set_board` deliberately leaves it alone."""
+        on = bool(on)
+        if on == getattr(self, "_show_all_pins", False):
+            return
+        self._show_all_pins = on
+        self._schedule_redraw()
+
+
+    def toggle_show_all_pins(self) -> None:
+        self.set_show_all_pins(not self.show_all_pins)
+
+
+    def _ensure_pin_index(self) -> Dict[str, Dict[str, Any]]:
+        """Per-layer index of every placed pin, built once per board.
+
+        {layer: {"xs": [...], "ys": [...]            # world pin coords
+                 "comps": [(Component, Shape, minx, miny, maxx, maxy,
+                            pitch | None, n_pins)],
+                 "groups": {shape name: {"pitch": float | None,
+                                         "n": pins per part,
+                                         "xs": [...], "ys": [...]}},
+                 "median_pitch": float | None,       # world units
+                 "proxy_pitch": float}}              # world units
+
+        The per-component world AABB (pin extent) is what both the
+        draw pass and the click hit-test cull with, so neither is
+        O(all pins) per frame / per click. median_pitch (over the
+        layer's shapes) drives the zoom gate; proxy_pitch —
+        sqrt(layer pin-cloud area / pin count) — stands in for it on a
+        layer whose shapes carry no pitch at all (all single-pin).
+        `groups` bucket the pins by shape so the GL tier can batch one
+        drawPoints per footprint and still honour the per-component
+        pitch predicate. Invalidated by `set_board` (`_pin_index =
+        None`)."""
+        idx = getattr(self, "_pin_index", None)
+        if idx is not None:
+            return idx
+        idx = {}
+        inf = float("inf")
+        for c in self.board.components.values():
+            shape = self.board.shapes.get(c.shape)
+            if not shape or not shape.pins:
+                continue
+            entry = idx.get(c.layer)
+            if entry is None:
+                entry = {"xs": [], "ys": [], "comps": [], "groups": {},
+                         "_pitches": []}
+                idx[c.layer] = entry
+            pitch = shape_pin_pitch(shape)
+            group = entry["groups"].get(c.shape)
+            if group is None:
+                group = {"pitch": pitch, "n": len(shape.pins),
+                         "xs": [], "ys": []}
+                entry["groups"][c.shape] = group
+            theta = math.radians(c.rotation)
+            ct, st = math.cos(theta), math.sin(theta)
+            xs, ys = entry["xs"], entry["ys"]
+            gxs, gys = group["xs"], group["ys"]
+            minx = miny = inf
+            maxx = maxy = -inf
+            for _name, dx, dy in shape.pins:
+                wx = c.x + dx * ct - dy * st
+                wy = c.y + dx * st + dy * ct
+                xs.append(wx)
+                ys.append(wy)
+                gxs.append(wx)
+                gys.append(wy)
+                if wx < minx: minx = wx
+                if wx > maxx: maxx = wx
+                if wy < miny: miny = wy
+                if wy > maxy: maxy = wy
+            entry["comps"].append((c, shape, minx, miny, maxx, maxy,
+                                   pitch, len(shape.pins)))
+            if pitch:
+                entry["_pitches"].append(pitch)
+        for entry in idx.values():
+            pitches = sorted(entry.pop("_pitches"))
+            entry["median_pitch"] = (pitches[len(pitches) // 2]
+                                     if pitches else None)
+            xs, ys = entry["xs"], entry["ys"]
+            area = (max(xs) - min(xs)) * (max(ys) - min(ys))
+            entry["proxy_pitch"] = (area / len(xs)) ** 0.5 if area > 0 else 0.0
+        self._pin_index = idx
+        self._all_pins_gate_cache = None
+        return idx
+
+
+    def _pins_resolvable(self, pitch: Optional[float], ppu: float) -> bool:
+        """Per-component predicate shared by the overlay's draw passes
+        and its hit-test: a part's pins are shown/clickable when its own
+        pitch is at least ALL_PINS_MIN_PITCH_PX on screen (pitch-less
+        single-pin parts always are)."""
+        return pitch is None or pitch * ppu >= self.ALL_PINS_MIN_PITCH_PX
+
+
+    def _overlay_budget(self, entry: Dict[str, Any], w: int, h: int,
+                        ppu: float) -> Tuple[int, int, Optional[int]]:
+        """(in_view, drawn, max_pins) for the current view.
+
+        in_view: resolvable pins estimated inside the viewport — each
+        part's pin count scaled by the fraction of its pin AABB that is
+        in view, so a BGA half off-screen counts half. drawn: how many
+        of those the overlay will draw after applying
+        ALL_PINS_MAX_VISIBLE, which it spends on the parts with the
+        fewest pins first. max_pins: a part with more pins than this is
+        left out (None when everything fits; 0 when nothing does).
+        ~4k AABB compares per call, memoised on the view so the gate,
+        the hint, the draw pass and the hit-test share one result per
+        frame."""
+        rx0, ry0, rx1, ry1 = self._viewport_world(w, h)
+        key = (self._view_layer, rx0, ry0, rx1, ry1, ppu,
+               self.ALL_PINS_MAX_VISIBLE)
+        cached = getattr(self, "_all_pins_gate_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        per_n: Dict[int, float] = {}
+        for _c, _shape, minx, miny, maxx, maxy, pitch, n in entry["comps"]:
+            if maxx < rx0 or minx > rx1 or maxy < ry0 or miny > ry1:
+                continue
+            if not self._pins_resolvable(pitch, ppu):
+                continue
+            frac = 1.0
+            if minx < rx0 or maxx > rx1:
+                aw = maxx - minx
+                if aw > 0:
+                    frac *= (min(maxx, rx1) - max(minx, rx0)) / aw
+            if miny < ry0 or maxy > ry1:
+                ah = maxy - miny
+                if ah > 0:
+                    frac *= (min(maxy, ry1) - max(miny, ry0)) / ah
+            per_n[n] = per_n.get(n, 0.0) + n * frac
+        in_view = sum(per_n.values())
+        drawn = in_view
+        max_pins: Optional[int] = None
+        if in_view > self.ALL_PINS_MAX_VISIBLE:
+            drawn = 0.0
+            max_pins = 0
+            for n in sorted(per_n):
+                if drawn + per_n[n] > self.ALL_PINS_MAX_VISIBLE:
+                    break
+                drawn += per_n[n]
+                max_pins = n
+        result = (int(round(in_view)), int(round(drawn)), max_pins)
+        self._all_pins_gate_cache = (key, result)
+        return result
+
+
+    def _visible_pin_estimate(self, entry: Dict[str, Any], w: int, h: int,
+                              ppu: float) -> int:
+        """Resolvable pins estimated in the viewport (see
+        `_overlay_budget`)."""
+        return self._overlay_budget(entry, w, h, ppu)[0]
+
+
+    def _comp_pins_shown(self, pitch: Optional[float], n: int, ppu: float,
+                         max_pins: Optional[int]) -> bool:
+        """The per-component predicate both draw passes and the hit-test
+        apply: the part's pitch resolves on screen AND it is within the
+        frame's item budget."""
+        if not self._pins_resolvable(pitch, ppu):
+            return False
+        return max_pins is None or n <= max_pins
+
+
+    def _px_per_unit(self, w: int, h: int) -> float:
+        """Current screen pixels per world unit (zoom-dependent). Goes
+        through `_project` so rotation/mirror and both tiers' projection
+        caches are honoured."""
+        x0, y0, x1, y1 = self.bounds
+        cx_w, cy_w = (x0 + x1) / 2, (y0 + y1) / 2
+        ax, ay = self._project(cx_w, cy_w, w, h)
+        bx, by = self._project(cx_w + 1000.0, cy_w, w, h)
+        return math.hypot(bx - ax, by - ay) / 1000.0
+
+
+    def _all_pins_visible(self, w: int, h: int) -> bool:
+        """True when the all-pins overlay is drawn AND clickable: toggle
+        on, an outer layer in view, the layer's median pin pitch at
+        least ALL_PINS_MIN_PITCH_PX on screen, and at least one part
+        fits the ALL_PINS_MAX_VISIBLE item budget. One predicate for
+        both tiers so draw and hit-test can never disagree."""
+        if not self.show_all_pins:
+            return False
+        if self._view_layer not in ("TOP", "BOTTOM"):
+            return False
+        entry = self._ensure_pin_index().get(self._view_layer)
+        if not entry or not entry["xs"]:
+            return False
+        ppu = self._px_per_unit(w, h)
+        pitch = entry["median_pitch"]
+        if pitch is None:
+            pitch = entry["proxy_pitch"]
+        if pitch * ppu < self.ALL_PINS_MIN_PITCH_PX:
+            return False
+        return self._overlay_budget(entry, w, h, ppu)[1] > 0
+
+
+    def _all_pins_hint(self, w: int, h: int) -> str:
+        """Status-strip fragment describing the overlay state."""
+        if not self.show_all_pins:
+            return ""
+        if self._view_layer not in ("TOP", "BOTTOM"):
+            return "  •  pads: outer layers only"
+        if self._all_pins_visible(w, h):
+            entry = self._ensure_pin_index()[self._view_layer]
+            max_pins = self._overlay_budget(entry, w, h,
+                                            self._px_per_unit(w, h))[2]
+            if max_pins is None:
+                return "  •  pads: ON (click any pad)  •  P=hide pads"
+            return (f"  •  pads: ON (parts over {max_pins} pins hidden — "
+                    "zoom in for those)  •  P=hide pads")
+        return "  •  pads: zoom in  •  P=hide pads"
+
+
+    def _find_any_pin_hit(
+        self, cx: int, cy: int,
+    ) -> Optional[Tuple[str, str, float]]:
+        """All-pins hit-test: (refdes, pin, screen distance px) of the
+        nearest pin within PIN_CLICK_RADIUS_PX across every component
+        on the view layer, or None. Components are culled by their
+        world AABB (expanded by the click radius in world units) and by
+        `_comp_pins_shown` (pitch + item budget) before any pin is
+        projected, so a part whose pins aren't drawn can't be picked
+        either."""
+        w, h = self.winfo_width(), self.winfo_height()
+        if not self._all_pins_visible(w, h):
+            return None
+        entry = self._ensure_pin_index().get(self._view_layer)
+        if not entry:
+            return None
+        ppu = self._px_per_unit(w, h)
+        if ppu <= 0:
+            return None
+        wx_click, wy_click = self._unproject(cx, cy)
+        r_px = self.PIN_CLICK_RADIUS_PX
+        r_world = r_px / ppu
+        max_pins = self._overlay_budget(entry, w, h, ppu)[2]
+        best: Optional[Tuple[str, str, float]] = None
+        best_d = r_px
+        for c, shape, minx, miny, maxx, maxy, pitch, n in entry["comps"]:
+            if (wx_click < minx - r_world or wx_click > maxx + r_world
+                    or wy_click < miny - r_world or wy_click > maxy + r_world):
+                continue
+            if not self._comp_pins_shown(pitch, n, ppu, max_pins):
+                continue
+            theta = math.radians(c.rotation)
+            ct, st = math.cos(theta), math.sin(theta)
+            for pin_name, dx, dy in shape.pins:
+                wx = c.x + dx * ct - dy * st
+                wy = c.y + dx * st + dy * ct
+                sx, sy = self._project(wx, wy, w, h)
+                ddx = sx - cx
+                ddy = sy - cy
+                if abs(ddx) > r_px or abs(ddy) > r_px:
+                    continue
+                d = (ddx * ddx + ddy * ddy) ** 0.5
+                if d < best_d:
+                    best_d = d
+                    best = (c.refdes, pin_name, d)
+        return best
+
+
+    def _find_any_pin_at(
+        self, cx: int, cy: int,
+    ) -> Optional[Tuple[str, str]]:
+        """(refdes, pin) form of `_find_any_pin_hit`."""
+        hit = self._find_any_pin_hit(cx, cy)
+        return None if hit is None else (hit[0], hit[1])
+
+
+    def _click_any_pin(self, cx: int, cy: int) -> bool:
+        """Click path for the all-pins overlay (pad only — the via
+        arbitration lives in `_click_via_or_pad`). Returns True when a
+        pin was hit, so the caller stops there."""
+        hit = self._find_any_pin_hit(cx, cy)
+        if hit is None:
+            return False
+        self._select_any_pin(hit[0], hit[1])
+        return True
+
+
+    def _select_any_pin(self, refdes: str, pin: str) -> None:
+        """Select a component AND one of its pins in one go, firing the
+        same callbacks the two-click path fires (`_on_select` only when
+        the component changed, then `_on_pin_select`)."""
+        comp_changed = refdes != self._selected_refdes
+        pin_changed = comp_changed or pin != self._selected_pin
+        self._selected_refdes = refdes
+        self._selected_pin = pin
+        if pin_changed:
+            self._schedule_redraw()
+        if comp_changed and self._on_select:
+            self._on_select(refdes)
+        if pin_changed and self._on_pin_select:
+            self._on_pin_select(pin)
+
+
+    @staticmethod
+    def _dist_to_poly_edges(
+        px: float, py: float, poly: List[Tuple[float, float]],
+    ) -> float:
+        """Shortest distance from a point to any edge of a polygon."""
+        best = float("inf")
+        n = len(poly)
+        for i in range(n):
+            x1, y1 = poly[i]
+            x2, y2 = poly[(i + 1) % n]
+            vx, vy = x2 - x1, y2 - y1
+            seg2 = vx * vx + vy * vy
+            if seg2 <= 1e-12:
+                t = 0.0
+            else:
+                t = ((px - x1) * vx + (py - y1) * vy) / seg2
+                t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+            ex, ey = x1 + t * vx - px, y1 + t * vy - py
+            d = (ex * ex + ey * ey) ** 0.5
+            if d < best:
+                best = d
+        return best
+
+
     def _find_component_at(self, cx: int, cy: int) -> Optional[str]:
         # When several components contain the click, the original rule
         # "smallest screen area wins" works fine for normal nesting (a
@@ -568,32 +964,57 @@ class CanvasCommon:
         # ones with similar bbox. Tuned so an 8+ pin component beats a
         # 4-pin HOLE annotation of similar size; nested chips inside
         # outlines still win because their area is much smaller.
+        #
+        # Near-miss pass: a click that lands within NEAR_MISS_PX of an
+        # outline edge (but outside every outline) picks the nearest
+        # such component. Slim parts — 0402s are a few px wide at
+        # moderate zoom — were otherwise only pickable via the 18 px
+        # centre-distance fallback, which fails on anything elongated.
         w, h = self.winfo_width(), self.winfo_height()
         candidates = [c for c in self.board.components.values()
                       if c.layer == self._view_layer]
+        tol = self.NEAR_MISS_PX
         best_refdes = None
         best_score = float("inf")
+        near_refdes = None
+        near_dist = tol
+        near_score = float("inf")
         for c in candidates:
             poly = self._component_polygon_screen(c, w, h)
-            if poly and self._point_in_poly(cx, cy, poly):
-                area = self._poly_area(poly)
-                shape = self.board.shapes.get(c.shape)
-                n_pins = len(shape.pins) if shape else 0
-                # Sparsity factor: 8x penalty for pin-less or 1-pin
-                # components (board outlines, mechanical anchors), down
-                # to 1x at 8+ pins. Real chips with ≥8 pins are
-                # unaffected so dense-pin nesting still resolves to
-                # the innermost chip.
-                if n_pins >= 8:
-                    factor = 1.0
-                else:
-                    factor = 8.0 / max(1, n_pins)
-                score = area * factor
+            if not poly:
+                continue
+            x0p, y0p, x1p, y1p = self._bbox_of_points(poly)
+            if (cx < x0p - tol or cx > x1p + tol
+                    or cy < y0p - tol or cy > y1p + tol):
+                continue
+            area = self._poly_area(poly)
+            shape = self.board.shapes.get(c.shape)
+            n_pins = len(shape.pins) if shape else 0
+            # Sparsity factor: 8x penalty for pin-less or 1-pin
+            # components (board outlines, mechanical anchors), down
+            # to 1x at 8+ pins. Real chips with ≥8 pins are
+            # unaffected so dense-pin nesting still resolves to
+            # the innermost chip.
+            if n_pins >= 8:
+                factor = 1.0
+            else:
+                factor = 8.0 / max(1, n_pins)
+            score = area * factor
+            if self._point_in_poly(cx, cy, poly):
                 if score < best_score:
                     best_score = score
                     best_refdes = c.refdes
+            elif best_refdes is None:
+                d = self._dist_to_poly_edges(cx, cy, poly)
+                if d <= tol and (d < near_dist
+                                 or (d == near_dist and score < near_score)):
+                    near_dist = d
+                    near_score = score
+                    near_refdes = c.refdes
         if best_refdes:
             return best_refdes
+        if near_refdes:
+            return near_refdes
         best_dist = self.CLICK_RADIUS_PX
         for c in candidates:
             sx, sy = self._project(c.x, c.y, w, h)
@@ -707,6 +1128,10 @@ class BoardCanvasCPU(CanvasCommon, tk.Canvas):
         # recomputed via sum(1 for ...) on every redraw — small but
         # measurable at drag-pan rates on big boards.
         self._comp_count_by_layer: Dict[str, int] = {}
+        # "Always show pads" overlay (see CanvasCommon). The per-board
+        # pin index is built lazily on first use and dropped in set_board.
+        self._show_all_pins: bool = False
+        self._pin_index: Optional[Dict[str, Dict[str, Any]]] = None
         self._compute_bounds()
         self._area_cache: Dict[str, float] = {}
         self._sorted_components: List[Component] = []
@@ -866,6 +1291,9 @@ class BoardCanvasCPU(CanvasCommon, tk.Canvas):
         # centi-mil TVW (or vice versa) must re-run the span heuristic,
         # or the measure tool reports 100x-off distances.
         self._units_per_mm_cache = None
+        # And the all-pins index (world pin coords of the OLD board).
+        # `_show_all_pins` itself is a user setting and survives.
+        self._pin_index = None
         self._compute_bounds()
         self._reorder_components()
         self.zoom = 1.0
@@ -1041,6 +1469,11 @@ class BoardCanvasCPU(CanvasCommon, tk.Canvas):
                 if c and c.layer == self._view_layer:
                     self._draw_one(c, w, h, dot_r, mode="highlight")
 
+            # All-pins overlay sits above the outlines and below the
+            # selected component's own (brighter) pins.
+            if self._all_pins_visible(w, h):
+                self._draw_all_pins(w, h)
+
             if self._selected_refdes:
                 c = self.board.components.get(self._selected_refdes)
                 if c and c.layer == self._view_layer:
@@ -1082,6 +1515,7 @@ class BoardCanvasCPU(CanvasCommon, tk.Canvas):
                 "  •  measure mode" + readout
                 + "  •  Esc to clear  •  M to exit"
             )
+        hint_extra += self._all_pins_hint(w, h)
         comp_label = ("ghost components"
                       if is_inner
                       else "components on this layer")
@@ -1591,6 +2025,40 @@ class BoardCanvasCPU(CanvasCommon, tk.Canvas):
                     )
 
 
+    def _draw_all_pins(self, w: int, h: int) -> None:
+        """All-pins overlay (tk items). Components are culled by their
+        cached world AABB against the viewport and by `_comp_pins_shown`
+        (pitch + item budget) before any pin is projected; the selected
+        component is skipped because `_draw_pins` draws its pins
+        (brighter) right after."""
+        entry = self._ensure_pin_index().get(self._view_layer)
+        if not entry:
+            return
+        rx0, ry0, rx1, ry1 = self._viewport_world(w, h)
+        ppu = self._px_per_unit(w, h)
+        max_pins = self._overlay_budget(entry, w, h, ppu)[2]
+        pin_r = max(0.8, 1.2 * (self.zoom ** 0.35)) * 0.85
+        color = self.ALL_PINS_COLOR
+        project = self._project
+        create_oval = self.create_oval
+        selected = self._selected_refdes
+        for c, shape, minx, miny, maxx, maxy, pitch, n in entry["comps"]:
+            if maxx < rx0 or minx > rx1 or maxy < ry0 or miny > ry1:
+                continue
+            if c.refdes == selected or \
+                    not self._comp_pins_shown(pitch, n, ppu, max_pins):
+                continue
+            theta = math.radians(c.rotation)
+            ct, st = math.cos(theta), math.sin(theta)
+            for _pin_name, dx, dy in shape.pins:
+                sx, sy = project(c.x + dx * ct - dy * st,
+                                 c.y + dx * st + dy * ct, w, h)
+                if sx < -2 or sx > w + 2 or sy < -2 or sy > h + 2:
+                    continue
+                create_oval(sx - pin_r, sy - pin_r, sx + pin_r, sy + pin_r,
+                            fill=color, outline="")
+
+
     def _draw_pins(self, c: Component, w: int, h: int) -> None:
         shape = self.board.shapes.get(c.shape)
         if not shape:
@@ -1673,14 +2141,12 @@ class BoardCanvasCPU(CanvasCommon, tk.Canvas):
                 self._on_measure_change()
             return
 
-        # Via hit-test: only when traces are visible AND the click radius
-        # finds a via. Wins over component selection because vias are
-        # smaller targets than components and clicking near one is
-        # almost always intentional (the user wants to "punch through"
-        # to the other layer). Flip layer + bail.
-        via = self._find_via_at(cx, cy)
-        if via is not None:
-            self._flip_layer_for_via(via)
+        # Via punch-through and the "Always show pads" one-click pad
+        # pick (nearest of the two wins; see CanvasCommon._click_via_or_
+        # pad). Both run before the component pick: a via or a pad is a
+        # small, deliberate target, so it beats the outline under the
+        # cursor.
+        if self._click_via_or_pad(cx, cy):
             return
 
         if self._selected_refdes:
@@ -1746,6 +2212,11 @@ if _GL_AVAILABLE:
         Hit-testing reuses the same projection math the CPU class uses
         (copied not inherited so we keep tight ownership of state on the
         OpenGLFrame instance)."""
+
+        # The all-pins overlay is one drawPoints per footprint here
+        # (~2 ms for 17k pins), so the item budget that protects the
+        # tk tier is raised to where it never limits in practice.
+        ALL_PINS_MAX_VISIBLE = 250_000
 
         render_tier = "gl"
 
@@ -1819,6 +2290,11 @@ if _GL_AVAILABLE:
             # The status bar reads this once per frame; previous code
             # ran a sum() over every component each redraw.
             self._comp_count_by_layer: Dict[str, int] = {}
+            # "Always show pads" overlay (mirrors BoardCanvasCPU). The
+            # GL tier additionally caches a world-space skia.Point list
+            # per layer inside the index so a frame is one drawPoints.
+            self._show_all_pins: bool = False
+            self._pin_index: Optional[Dict[str, Dict[str, Any]]] = None
 
             self._compute_bounds()
             self._area_cache: Dict[str, float] = {}
@@ -1889,6 +2365,8 @@ if _GL_AVAILABLE:
             self._comp_count_by_layer = {}
             # And the memoized unit scale (mil vs centi-mil), same reason.
             self._units_per_mm_cache = None
+            # And the all-pins index (user toggle itself survives).
+            self._pin_index = None
             self._compute_bounds()
             self._reorder_components()
             self.zoom = 1.0
@@ -2255,6 +2733,11 @@ if _GL_AVAILABLE:
                 self._draw_traces_gl(canvas, w, h)
 
             self._draw_components_gl(canvas, w, h, dot_r)
+
+            # All-pins overlay: above outlines, below the selected
+            # component's brighter pins (same order as the CPU tier).
+            if self._all_pins_visible(w, h):
+                self._draw_all_pins_gl(canvas, w, h)
 
             if self._selected_refdes:
                 c = self.board.components.get(self._selected_refdes)
@@ -2747,6 +3230,52 @@ if _GL_AVAILABLE:
             canvas.drawTextBlob(
                 blob, cx - width / 2, baseline, paint,
             )
+
+
+        def _draw_all_pins_gl(self, canvas, w: int, h: int) -> None:
+            """All-pins overlay as one Skia drawPoints call per footprint.
+
+            The pin index buckets the layer's pins by shape; each
+            bucket's coordinates are cached as world-space skia.Points
+            (y negated, like the outline paths) and drawn under
+            `_world_to_screen_matrix` with a round-capped stroke whose
+            width is pre-divided by the effective scale so the dots stay
+            pin_r px on screen at any zoom. Buckets that fail
+            `_comp_pins_shown` at this zoom are skipped, exactly as the
+            CPU tier skips those components. A few hundred drawPoints
+            calls per frame at most (one per distinct footprint), no
+            per-pin Python loop; Skia clips off-screen points."""
+            entry = self._ensure_pin_index().get(self._view_layer)
+            if not entry or not entry["xs"]:
+                return
+            (_, _, _, _, _, _, _, _, base_scale, _, _, _, _,
+             zoom, _, _) = self._frame_proj
+            effective_scale = base_scale * zoom
+            if effective_scale <= 1e-9:
+                return
+            ppu = self._px_per_unit(w, h)
+            max_pins = self._overlay_budget(entry, w, h, ppu)[2]
+            pin_r = max(0.8, 1.2 * (zoom ** 0.35)) * 0.85
+            paint = _skia.Paint()
+            paint.setAntiAlias(True)
+            paint.setColor(self._hex_to_skia(self.ALL_PINS_COLOR))
+            paint.setStyle(_skia.Paint.Style.kStroke_Style)
+            paint.setStrokeCap(_skia.Paint.Cap.kRound_Cap)
+            paint.setStrokeWidth(2.0 * pin_r / effective_scale)
+            canvas.save()
+            canvas.concat(self._world_to_screen_matrix())
+            for group in entry["groups"].values():
+                if not self._comp_pins_shown(group["pitch"], group["n"],
+                                             ppu, max_pins):
+                    continue
+                pts = group.get("gl_points")
+                if pts is None:
+                    pts = [_skia.Point(x, -y)
+                           for x, y in zip(group["xs"], group["ys"])]
+                    group["gl_points"] = pts
+                canvas.drawPoints(_skia.Canvas.PointMode.kPoints_PointMode,
+                                  pts, paint)
+            canvas.restore()
 
 
         def _draw_pins_gl(
@@ -3461,6 +3990,7 @@ if _GL_AVAILABLE:
                     "  •  measure mode" + readout
                     + "  •  Esc clears  •  M exits"
                 )
+            hint_extra += self._all_pins_hint(w, h)
             status = (
                 f"{layer_indicator}  •  {n_layer} {comp_label}"
                 f"  •  zoom {zoom_pct}%  •  drag to pan, wheel to zoom, "
@@ -3624,11 +4154,9 @@ if _GL_AVAILABLE:
                     self._on_measure_change()
                 return
 
-            # Via hit-test runs before component pick. See BoardCanvasCPU
-            # ._handle_click for the rationale.
-            via = self._find_via_at(cx, cy)
-            if via is not None:
-                self._flip_layer_for_via(via)
+            # Via punch-through / one-click pad pick, nearest wins. See
+            # BoardCanvasCPU._handle_click and CanvasCommon._click_via_or_pad.
+            if self._click_via_or_pad(cx, cy):
                 return
 
             if self._selected_refdes:

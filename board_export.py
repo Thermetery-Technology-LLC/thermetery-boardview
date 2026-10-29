@@ -36,9 +36,13 @@ Coordinate / transform provenance — replicated from viewer.py:
   desktop hit-testing sees.
 
 * Component outline polygon: board_canvas.py
-  (``_component_polygon_world``) — shape.bbox() padded by 5 units per
-  side, 4 corners rotated by the same rotation matrix; None when the
-  shape is missing/degenerate (extent < 0.5 in both axes).
+  (``_component_polygon_world``) — shape.bbox() grown by the shared
+  pad rule in src/units.py (``shape_outline_bbox``: at least 5 units
+  per side, and any axis thinner than 0.6 x the shape's pin pitch —
+  median nearest-neighbour pad distance — is widened to that, clamped
+  to 0.3..5 mm when the unit scale is known), 4 corners rotated by the
+  same rotation matrix; None when the shape is missing/degenerate
+  (extent < 0.5 in both axes).
 
 * Segment layer encoding: board_canvas.py (``_segments_arrays``) —
   ``topo._seg_arrays["layer"]`` is a uint8 index into
@@ -67,7 +71,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.parsers.boardview import BoardModel, FZKeyError, parse as parse_board
-from src.units import units_per_mm_for_span
+from src.units import shape_outline_bbox, units_per_mm_for_span
 
 _COMPACT = (",", ":")
 
@@ -146,20 +150,25 @@ def _component_outline(
     *,
     local_bbox: Optional[Tuple[float, float, float, float]] = None,
     transform: Optional[Tuple[float, float, float, float]] = None,
+    units_per_mm: Optional[float] = None,
 ) -> Optional[List[List[float]]]:
     """Absolute outline polygon — replicates board_canvas.py's
-    _component_polygon_world: shape bbox + 5-unit pad, 4 corners
-    rotated about the component origin. None => renderer uses bbox."""
+    _component_polygon_world: shape bbox grown by the shared
+    units.shape_outline_bbox pad rule (pitch-derived, so zero-width
+    2-pin chip passives get a visible body), 4 corners rotated about
+    the component origin. None => renderer uses bbox.
+
+    `units_per_mm` is the same scale the desktop canvas passes
+    (units.units_per_mm_for_span over the component span); it drives
+    the rule's mm-based fallback and cap, so pass it whenever it is
+    known or the exported outline can differ from the desktop one."""
     if shape is None or not shape.pins:
         return None
     x0, y0, x1, y1 = local_bbox if local_bbox is not None else shape.bbox()
     if (x1 - x0) < 0.5 and (y1 - y0) < 0.5:
         return None
-    pad = 5
-    x0 -= pad
-    y0 -= pad
-    x1 += pad
-    y1 += pad
+    x0, y0, x1, y1 = shape_outline_bbox(shape, units_per_mm,
+                                        bbox=(x0, y0, x1, y1))
     corners = ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
     if transform is None:
         theta = math.radians(_num(comp.rotation))
@@ -238,6 +247,16 @@ def _open_board(path: str, key: Optional[str]) -> str:
     # Shape geometry is immutable after parsing, so cache its local bounds.
     shape_bbox_cache: Dict[str, Tuple[float, float, float, float]] = {}
 
+    # Unit scale up front (the same heuristic meta.units_per_mm reports
+    # below) so _component_outline's pad rule sees what the desktop
+    # canvas sees; the outline rule has mm-based terms.
+    outline_units_per_mm: Optional[float] = None
+    if model.components:
+        _xs = [_num(c.x) for c in model.components.values()]
+        _ys = [_num(c.y) for c in model.components.values()]
+        outline_units_per_mm = units_per_mm_for_span(
+            max(max(_xs) - min(_xs), max(_ys) - min(_ys)))
+
     for refdes, comp in model.components.items():
         shape = model.shapes.get(comp.shape) if comp.shape else None
         cx, cy = _num(comp.x), _num(comp.y)
@@ -290,6 +309,7 @@ def _open_board(path: str, key: Optional[str]) -> str:
             shape,
             local_bbox=local_bbox,
             transform=(cx, cy, ct, st),
+            units_per_mm=outline_units_per_mm,
         )
 
         # Component bbox: prefer the outline polygon (what the desktop

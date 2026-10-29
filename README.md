@@ -123,7 +123,26 @@ CI runs the suite on Windows and Ubuntu for every push and pull request
   colour) so you can see the full cross-layer path.
 - **Click an IC** to select (pins render as yellow dots); **click a
   pin** to focus it and fill the Net tab with everything else on that
-  net; **click a Net-tab row** to jump (auto-flips layer).
+  net; **click a Net-tab row** to jump (auto-flips layer). The Net tab
+  stays in front while you jump from row to row, so every node of a
+  net can be located without clicking back to the tab each time.
+- **P** (or **View ▸ Always show pads**, or the toolbar **Pads** button)
+  draws the pads of every component on the viewed layer, and a single
+  click on any pad selects that component *and* that pin in one go.
+  The overlay is skipped while the board is too far out for the pads
+  to be distinguishable (the canvas hint says "pads: zoom in"). On the
+  software renderer there is also a per-frame budget of ~4,000 pads:
+  when more are in view, the parts with the most pins (BGAs) are left
+  out until you zoom into them, and the hint says which sizes are
+  hidden. The setting is remembered between runs (`show_all_pins` in
+  the config file).
+- Slim parts (0402/0603 resistors and capacitors in `.tvw` files) draw
+  as real rectangles and can be picked by clicking anywhere on or
+  within a few pixels of the body, not just on the refdes label.
+- **Starting without a file** shows a recent-boards launcher: pick an
+  entry (double-click / Enter / *Open selected*), *Browse…* for
+  another file, or *Quit*. With an empty recent list the file dialog
+  opens directly, as before.
 - **Component / Net search** in the toolbar autocompletes by refdes or
   net name; **View menu** does mirror-X and 90° rotate.
 - **Drag-drop** a boardview file onto the canvas to open it (requires

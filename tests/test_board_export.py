@@ -80,8 +80,19 @@ class BoardExportTests(unittest.TestCase):
         self.assertEqual(shape.bbox_calls, 1)
         self.assertEqual(exported["meta"]["bbox"], [-20.0, -30.0, 130.0, 140.0])
         self.assertEqual(exported["meta"]["units_per_mm"], 39.37)
-        self.assertEqual(exported["components"][0]["bbox"], [-5.0, -5.0, 15.0, 5.0])
-        self.assertEqual(exported["components"][1]["bbox"], [95.0, 95.0, 105.0, 115.0])
+        # 10-mil pitch on a mil-scale board: the thin axis is grown to the
+        # 0.3 mm (11.8 mil) floor of the shared units.shape_outline_bbox
+        # rule, the long axis gets the 5-unit floor pad.
+        half = 0.3 * 39.37 / 2
+        u1 = exported["components"][0]["bbox"]
+        self.assertEqual((u1[0], u1[2]), (-5.0, 15.0))
+        self.assertAlmostEqual(u1[1], -half)
+        self.assertAlmostEqual(u1[3], half)
+        u2 = exported["components"][1]["bbox"]  # rotated 90 deg
+        self.assertAlmostEqual(u2[0], 100.0 - half)
+        self.assertAlmostEqual(u2[2], 100.0 + half)
+        self.assertAlmostEqual(u2[1], 95.0)
+        self.assertAlmostEqual(u2[3], 115.0)
         self.assertEqual(
             [pin["net"] for pin in exported["components"][0]["pins"]],
             [0, 1],
