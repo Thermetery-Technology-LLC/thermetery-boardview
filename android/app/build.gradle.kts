@@ -103,8 +103,8 @@ android {
         applicationId = "com.thermetery.boardview"
         minSdk = 24
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.1.0"
+        versionCode = 6
+        versionName = "1.2.0"
 
         // Native kernels are prebuilt under src/main/jniLibs/<abi>/ for
         // exactly these two ABIs (16 KB-aligned, NDK r29).
@@ -160,10 +160,19 @@ chaquopy {
     defaultConfig {
         version = "3.13"
         // Chaquopy 17 requires buildPython's minor version to MATCH the
-        // target version above, so the anaconda 3.11 python named in the
-        // contract cannot be used. CPython 3.13 was installed with the
-        // Python install manager:  py install 3.13
-        buildPython("C:/Users/Administrator/AppData/Local/Python/pythoncore-3.13-64/python.exe")
+        // target version above (3.13). Resolution order:
+        //   1. CHAQUOPY_BUILD_PYTHON env var — an explicit interpreter path
+        //      (set this when the launcher below cannot find 3.13).
+        //   2. Windows: the Python launcher, `py -3.13`.
+        //   3. Elsewhere: `python3.13` on PATH.
+        // No machine-specific path is hardcoded; see android/README.md.
+        val explicitPython = System.getenv("CHAQUOPY_BUILD_PYTHON")
+        when {
+            !explicitPython.isNullOrBlank() -> buildPython(explicitPython)
+            System.getProperty("os.name").lowercase().contains("win") ->
+                buildPython("py", "-3.13")
+            else -> buildPython("python3.13")
+        }
         pip {
             install("numpy==1.26.2")
         }
