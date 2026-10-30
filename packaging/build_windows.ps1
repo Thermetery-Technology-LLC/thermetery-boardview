@@ -189,6 +189,19 @@ function Assert-ReleasePayload([string]$PayloadDir) {
             throw "Frozen payload is incomplete: $path"
         }
     }
+    # PyInstaller's tkinter run-time hook aborts at startup when these are
+    # missing, and the windowed bootloader shows that as a modal error box,
+    # so fail here with the cause instead of at the self-test timeout. The
+    # usual reason is a build Python whose Tcl/Tk 9 keeps its script library
+    # in a zipfs archive that this PyInstaller cannot collect (see README).
+    foreach ($dir in @("_internal\_tcl_data", "_internal\_tk_data")) {
+        $dataDir = Join-Path $PayloadDir $dir
+        if (-not (Test-Path -LiteralPath $dataDir -PathType Container) -or
+            -not (Get-ChildItem -LiteralPath $dataDir -Force | Select-Object -First 1)) {
+            throw "Frozen payload has no Tcl/Tk runtime data at $dataDir. " +
+                  "The build Python must bundle Tcl/Tk 8.6 (see packaging/README.md)."
+        }
+    }
     if (Test-Path -LiteralPath (Join-Path $PayloadDir "portable.flag")) {
         throw "The canonical installer payload unexpectedly contains portable.flag."
     }
