@@ -207,24 +207,25 @@ function Assert-ReleasePayload([string]$PayloadDir) {
 }
 
 function Write-FrozenSelfTestLog {
-    # The windowed exe cannot print to the console: boardviewer_entry.py
-    # redirects stdout/stderr into boardviewer.log under the data directory
-    # (LOCALAPPDATA for the installed layout, <payload>\data for portable).
-    # Surface it here so a CI failure shows the frozen process's own output,
-    # including the faulthandler stack dump written when a check hangs.
+    # Surface everything the frozen process wrote so a CI failure shows its
+    # own output: the redirected stdout/stderr files (anything printed before
+    # or instead of the entry script's own log) and boardviewer.log under the
+    # data directory (LOCALAPPDATA for the installed layout, <payload>\data
+    # for portable), which carries the faulthandler stack dump of a hung check.
     param(
         [Parameter(Mandatory = $true)][string]$Label,
         [Parameter(Mandatory = $true)][string[]]$Roots
     )
     $logs = @()
     foreach ($root in $Roots) {
-        if (Test-Path -LiteralPath $root -PathType Container) {
-            $logs += Get-ChildItem -LiteralPath $root -Recurse -Force -Filter "boardviewer.log" `
-                -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
+        foreach ($name in @("boardviewer.log", "self-test-stdout.txt", "self-test-stderr.txt")) {
+            $logs += Get-ChildItem -LiteralPath $root -Recurse -Force -Filter $name `
+                -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 0 }
         }
     }
     if (-not $logs) {
-        Write-Host "$Label frozen self-test left no boardviewer.log under: $($Roots -join '; ')"
+        Write-Host "$Label frozen self-test left no log output under: $($Roots -join '; ')"
         return
     }
     foreach ($log in $logs) {
@@ -265,13 +266,27 @@ function Invoke-FrozenSelfTest {
         Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
         $env:LOCALAPPDATA = Join-Path $testRoot "local app data"
         $env:BOARDVIEWER_SELF_TEST_OUTPUT = $diagnostics
+        # A windowed exe has no console, so without these redirects anything
+        # the bootloader or the entry script prints before boardviewer.log is
+        # opened (import errors, run-time hook failures) is lost.
         $process = Start-Process -FilePath $exe `
             -ArgumentList "--packaging-self-test" `
             -WorkingDirectory $testRoot `
             -WindowStyle Hidden `
+            -RedirectStandardOutput (Join-Path $testRoot "self-test-stdout.txt") `
+            -RedirectStandardError (Join-Path $testRoot "self-test-stderr.txt") `
             -PassThru
         $timedOut = $false
         if (-not $process.WaitForExit(60000)) {
+            # A modal dialog (bootloader error box, Tcl panic) is the usual
+            # reason a self-test never returns: name it before killing.
+            try {
+                $process.Refresh()
+                $title = $process.MainWindowTitle
+                Write-Host "$Label frozen self-test still running after 60 s; main window title: '$title'"
+            } catch {
+                Write-Host "$Label frozen self-test still running after 60 s (window title unavailable)"
+            }
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
             $timedOut = $true
         } else {
