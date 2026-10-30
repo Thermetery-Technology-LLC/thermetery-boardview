@@ -176,7 +176,36 @@ function Assert-NativeCompiler {
     }
 }
 
-function Assert-ReleasePayload([string]$PayloadDir) {
+function Test-EmbeddedTclTkLibrary {
+    # Tcl/Tk 9 Windows builds (python.org 3.14.7 and later) ship the script
+    # library as a zip archive appended to tcl90.dll and tcl9tk90.dll, which
+    # Tcl mounts at //zipfs:/ by itself; the payload then has no
+    # _tcl_data/_tk_data folders. Confirm the collected DLLs still carry
+    # those archives by reading them as zip files with the build Python.
+    param(
+        [Parameter(Mandatory = $true)][string]$PayloadDir,
+        [Parameter(Mandatory = $true)][string]$Python
+    )
+    $internal = Join-Path $PayloadDir "_internal"
+    if (-not (Test-Path -LiteralPath $internal -PathType Container)) {
+        return $false
+    }
+    $tclDll = Get-ChildItem -LiteralPath $internal -Filter "tcl9*.dll" -File |
+        Where-Object { $_.Name -notlike "tcl9tk*" } | Select-Object -First 1
+    $tkDll = Get-ChildItem -LiteralPath $internal -Filter "tcl9tk9*.dll" -File |
+        Select-Object -First 1
+    if (-not $tclDll -or -not $tkDll) {
+        return $false
+    }
+    $probe = & $Python -c "import sys, zipfile; print('ok' if all(member in zipfile.ZipFile(path).namelist() for path, member in ((sys.argv[1], 'tcl_library/init.tcl'), (sys.argv[2], 'tk_library/tk.tcl'))) else 'no')" $tclDll.FullName $tkDll.FullName 2>$null
+    return $LASTEXITCODE -eq 0 -and ($probe | Select-Object -Last 1) -eq "ok"
+}
+
+function Assert-ReleasePayload {
+    param(
+        [Parameter(Mandatory = $true)][string]$PayloadDir,
+        [Parameter(Mandatory = $true)][string]$Python
+    )
     $required = @(
         (Join-Path $PayloadDir "ThermeteryBoardviewer.exe"),
         (Join-Path $PayloadDir "_internal\src\parsers\native\tvw_native.dll"),
@@ -189,18 +218,23 @@ function Assert-ReleasePayload([string]$PayloadDir) {
             throw "Frozen payload is incomplete: $path"
         }
     }
-    # PyInstaller's tkinter run-time hook aborts at startup when these are
-    # missing, and the windowed bootloader shows that as a modal error box,
-    # so fail here with the cause instead of at the self-test timeout. The
-    # usual reason is a build Python whose Tcl/Tk 9 keeps its script library
-    # in a zipfs archive that this PyInstaller cannot collect (see README).
-    foreach ($dir in @("_internal\_tcl_data", "_internal\_tk_data")) {
-        $dataDir = Join-Path $PayloadDir $dir
-        if (-not (Test-Path -LiteralPath $dataDir -PathType Container) -or
-            -not (Get-ChildItem -LiteralPath $dataDir -Force | Select-Object -First 1)) {
-            throw "Frozen payload has no Tcl/Tk runtime data at $dataDir. " +
-                  "The build Python must bundle Tcl/Tk 8.6 (see packaging/README.md)."
-        }
+    # Without its script library Tk initialisation aborts at startup, which
+    # the windowed bootloader shows as a modal error box and the self-test
+    # only sees as a 60 s timeout, so fail here with the cause. Two layouts
+    # are valid: Tcl/Tk 8.6 collected into _internal\_tcl_data and _tk_data
+    # (PyInstaller's run-time hook points TCL_LIBRARY/TK_LIBRARY at them),
+    # or Tcl/Tk 9 with the library embedded in the DLLs themselves.
+    $dataDirs = @("_internal\_tcl_data", "_internal\_tk_data") |
+        ForEach-Object { Join-Path $PayloadDir $_ }
+    $missingDataDirs = @($dataDirs | Where-Object {
+        -not (Test-Path -LiteralPath $_ -PathType Container) -or
+        -not (Get-ChildItem -LiteralPath $_ -Force | Select-Object -First 1)
+    })
+    if ($missingDataDirs.Count -gt 0 -and
+        -not (Test-EmbeddedTclTkLibrary -PayloadDir $PayloadDir -Python $Python)) {
+        throw "Frozen payload has no Tcl/Tk runtime data: neither populated " +
+              "_internal\_tcl_data and _tk_data folders nor tcl9*.dll files " +
+              "with embedded library archives (see packaging/README.md)."
     }
     if (Test-Path -LiteralPath (Join-Path $PayloadDir "portable.flag")) {
         throw "The canonical installer payload unexpectedly contains portable.flag."
@@ -289,6 +323,9 @@ function Invoke-FrozenSelfTest {
             -RedirectStandardOutput (Join-Path $testRoot "self-test-stdout.txt") `
             -RedirectStandardError (Join-Path $testRoot "self-test-stderr.txt") `
             -PassThru
+        # Windows PowerShell 5.1 reports ExitCode as $null after the process
+        # has gone unless the handle was opened while it was still alive.
+        $null = $process.Handle
         $timedOut = $false
         if (-not $process.WaitForExit(60000)) {
             # A modal dialog (bootloader error box, Tcl panic) is the usual
@@ -351,7 +388,8 @@ function Invoke-FrozenSelfTest {
     $result = Get-Content -LiteralPath $diagnostics -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($process.ExitCode -ne 0 -or -not $result.ok) {
         Write-FrozenSelfTestLog -Label $Label -Roots $logRoots
-        throw "$Label frozen self-test failed: $($result.error)"
+        $detail = if ($result.PSObject.Properties['error']) { $result.error } else { "no error recorded" }
+        throw "$Label frozen self-test failed (exit $($process.ExitCode)): $detail"
     }
     Write-Host "$Label frozen self-test checks: $($result.checks | ConvertTo-Json -Compress)"
     if ([bool]$result.portable -ne $ExpectedPortable) {
@@ -611,7 +649,7 @@ try {
         "--repo-root", $RepoRoot,
         "--destination", (Join-Path $payload "licenses")
     )
-    Assert-ReleasePayload $payload
+    Assert-ReleasePayload -PayloadDir $payload -Python $buildPython
     Invoke-FrozenSelfTest -PayloadDir $payload -ExpectedPortable $false -Label "installed"
 
     Write-Step "Creating portable ZIP"
