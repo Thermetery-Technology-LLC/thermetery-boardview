@@ -34,10 +34,19 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v6
 
-      - name: Set up Python 3.14 x64
+      # Pinned to the patch level on purpose. actions/python-versions builds
+      # from 3.14.7 on ship Tcl/Tk 9.0 with the script library embedded in a
+      # zipfs archive; PyInstaller 6.21 cannot collect it ("TclTkInfo: Tcl
+      # library/data directory '//zipfs:/lib/tcl/tcl_library' does not
+      # exist") and the frozen app then hangs in Tk initialisation, which the
+      # packaging self-test reports as a 60 s timeout. 3.14.6 is the last
+      # build with Tcl/Tk 8.6, the runtime every shipped release has used.
+      # Moving to Tcl/Tk 9 needs PyInstaller >= 6.22 and tkinterdnd2 >= 0.7.0
+      # together with a viewer check on Tk 9.
+      - name: Set up Python 3.14.6 x64
         uses: actions/setup-python@v6
         with:
-          python-version: "3.14"
+          python-version: "3.14.6"
           architecture: x64
 
       - name: Set up MSVC x64 compiler
