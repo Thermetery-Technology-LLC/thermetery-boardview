@@ -197,7 +197,25 @@ function Test-EmbeddedTclTkLibrary {
     if (-not $tclDll -or -not $tkDll) {
         return $false
     }
-    $probe = & $Python -c "import sys, zipfile; print('ok' if all(member in zipfile.ZipFile(path).namelist() for path, member in ((sys.argv[1], 'tcl_library/init.tcl'), (sys.argv[2], 'tk_library/tk.tcl'))) else 'no')" $tclDll.FullName $tkDll.FullName 2>$null
+    # The snippet swallows its own errors (a DLL without an appended archive
+    # raises BadZipFile): anything on stderr would otherwise surface as a
+    # NativeCommandError under $ErrorActionPreference = "Stop" instead of
+    # the caller's explanation of what is missing.
+    $script = @"
+import sys, zipfile
+try:
+    ok = all(member in zipfile.ZipFile(path).namelist()
+             for path, member in ((sys.argv[1], 'tcl_library/init.tcl'),
+                                  (sys.argv[2], 'tk_library/tk.tcl')))
+except Exception:
+    ok = False
+print('ok' if ok else 'no')
+"@
+    try {
+        $probe = & $Python -c $script $tclDll.FullName $tkDll.FullName 2>$null
+    } catch {
+        return $false
+    }
     return $LASTEXITCODE -eq 0 -and ($probe | Select-Object -Last 1) -eq "ok"
 }
 
@@ -386,6 +404,10 @@ function Invoke-FrozenSelfTest {
         throw "$Label frozen self-test did not produce diagnostics (exit $($process.ExitCode))."
     }
     $result = Get-Content -LiteralPath $diagnostics -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($null -eq $result) {
+        Write-FrozenSelfTestLog -Label $Label -Roots $logRoots
+        throw "$Label frozen self-test left empty diagnostics (exit $($process.ExitCode))."
+    }
     if ($process.ExitCode -ne 0 -or -not $result.ok) {
         Write-FrozenSelfTestLog -Label $Label -Roots $logRoots
         $detail = if ($result.PSObject.Properties['error']) { $result.error } else { "no error recorded" }
