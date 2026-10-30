@@ -206,6 +206,35 @@ function Assert-ReleasePayload([string]$PayloadDir) {
     }
 }
 
+function Write-FrozenSelfTestLog {
+    # The windowed exe cannot print to the console: boardviewer_entry.py
+    # redirects stdout/stderr into boardviewer.log under the data directory
+    # (LOCALAPPDATA for the installed layout, <payload>\data for portable).
+    # Surface it here so a CI failure shows the frozen process's own output,
+    # including the faulthandler stack dump written when a check hangs.
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string[]]$Roots
+    )
+    $logs = @()
+    foreach ($root in $Roots) {
+        if (Test-Path -LiteralPath $root -PathType Container) {
+            $logs += Get-ChildItem -LiteralPath $root -Recurse -Force -Filter "boardviewer.log" `
+                -ErrorAction SilentlyContinue
+        }
+    }
+    if (-not $logs) {
+        Write-Host "$Label frozen self-test left no boardviewer.log under: $($Roots -join '; ')"
+        return
+    }
+    foreach ($log in $logs) {
+        Write-Host "----- $Label frozen self-test log: $($log.FullName) -----"
+        Get-Content -LiteralPath $log.FullName -Encoding UTF8 -ErrorAction SilentlyContinue |
+            Select-Object -Last 200 | ForEach-Object { Write-Host $_ }
+        Write-Host "----- end of $($log.Name) -----"
+    }
+}
+
 function Invoke-FrozenSelfTest {
     param(
         [Parameter(Mandatory = $true)][string]$PayloadDir,
@@ -241,11 +270,13 @@ function Invoke-FrozenSelfTest {
             -WorkingDirectory $testRoot `
             -WindowStyle Hidden `
             -PassThru
+        $timedOut = $false
         if (-not $process.WaitForExit(60000)) {
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            throw "$Label frozen self-test timed out after 60 seconds."
+            $timedOut = $true
+        } else {
+            $process.Refresh()
         }
-        $process.Refresh()
     } finally {
         $env:Path = $oldPath
         if ($null -eq $oldData) {
@@ -280,13 +311,21 @@ function Invoke-FrozenSelfTest {
         }
     }
 
+    $logRoots = @($testRoot, (Join-Path $PayloadDir "data"))
+    if ($timedOut) {
+        Write-FrozenSelfTestLog -Label $Label -Roots $logRoots
+        throw "$Label frozen self-test timed out after 60 seconds."
+    }
     if (-not (Test-Path -LiteralPath $diagnostics -PathType Leaf)) {
+        Write-FrozenSelfTestLog -Label $Label -Roots $logRoots
         throw "$Label frozen self-test did not produce diagnostics (exit $($process.ExitCode))."
     }
     $result = Get-Content -LiteralPath $diagnostics -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($process.ExitCode -ne 0 -or -not $result.ok) {
+        Write-FrozenSelfTestLog -Label $Label -Roots $logRoots
         throw "$Label frozen self-test failed: $($result.error)"
     }
+    Write-Host "$Label frozen self-test checks: $($result.checks | ConvertTo-Json -Compress)"
     if ([bool]$result.portable -ne $ExpectedPortable) {
         throw "$Label reported portable=$($result.portable), expected $ExpectedPortable."
     }
