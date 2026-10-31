@@ -154,6 +154,8 @@ class ViewerApp(tk.Tk):
         self.bind("M", lambda e: self._safe(self._toggle_measure))
         self.bind("p", lambda e: self._safe(self._toggle_show_all_pins))
         self.bind("P", lambda e: self._safe(self._toggle_show_all_pins))
+        self.bind("x", lambda e: self._safe(self._toggle_mirror))
+        self.bind("X", lambda e: self._safe(self._toggle_mirror))
         self.bind("<Escape>", lambda e: self._safe(self._on_escape))
         self.bind("<Control-o>", lambda e: self._menu_open_board())
         self.bind("<Control-O>", lambda e: self._menu_open_board())
@@ -314,8 +316,16 @@ class ViewerApp(tk.Tk):
                                   variable=self._pads_var,
                                   command=self._on_pads_menu_pick)
         view_menu.add_separator()
-        view_menu.add_command(label="Mirror X",
-                              command=lambda: self.canvas.toggle_mirror_x())
+        # "Mirror view": flips the board left-right. The check shows what
+        # is drawn now, so on BOTTOM (which mirrors automatically, as if
+        # the board were turned over) it is ticked, and unticking it shows
+        # the bottom side without the flip. Kept in sync by
+        # `_sync_mirror_widgets`, which `_sync_layer_widgets` calls on
+        # every layer change.
+        self._mirror_var = tk.BooleanVar(value=False)
+        view_menu.add_checkbutton(label="Mirror view", accelerator="X",
+                                  variable=self._mirror_var,
+                                  command=self._toggle_mirror)
         view_menu.add_command(label="Rotate 90°  CCW",
                               command=lambda: self.canvas.rotate(1))
         view_menu.add_command(label="Rotate 90°  CW",
@@ -413,6 +423,14 @@ class ViewerApp(tk.Tk):
             toolbar, text="Rotate ↺", width=10,
             command=lambda: self.canvas.rotate(1))
         self.rotate_ccw_btn.pack(side="right", padx=(4, 0))
+        # Mirror toggle, same ON/OFF style as Traces / Measure / Pads. ON
+        # means the view is drawn mirrored right now, so it reads ON on
+        # BOTTOM (automatic flip) until the user turns it off; see
+        # `_sync_mirror_widgets`. Packed after the rotate buttons so it
+        # lands on their left, the same order as the Android toolbar.
+        self.mirror_btn = ttk.Button(toolbar, text="Mirror: OFF",
+                                     command=self._toggle_mirror, width=11)
+        self.mirror_btn.pack(side="right", padx=(4, 0))
 
         # Main paned layout: left = info tabs, right = board canvas
         paned = ttk.Panedwindow(self, orient="horizontal")
@@ -724,7 +742,9 @@ class ViewerApp(tk.Tk):
         """Refresh the toolbar layer dropdown / button label after a
         layer change. Called from both the L-key cycle and any callback
         path that might mutate `view_layer` (component-pick auto-flip,
-        net-jump auto-flip, board reload)."""
+        net-jump auto-flip, board reload). Also refreshes the Mirror
+        widgets: moving onto or off BOTTOM flips the effective mirror."""
+        self._sync_mirror_widgets()
         if hasattr(self, "layer_combo") and self.layer_combo is not None:
             layers = available_layers_for(self.canvas.board)
             current_values = list(self.layer_combo["values"])
@@ -773,6 +793,21 @@ class ViewerApp(tk.Tk):
         if self.canvas.measure_mode:
             self.canvas.clear_measurement()
 
+    # ----- Mirror ------------------------------------------------------------
+
+    def _toggle_mirror(self) -> None:
+        """X key / toolbar button / View menu: flip the view left-right."""
+        self.canvas.toggle_mirror_x()
+        self._sync_mirror_widgets()
+        self._update_status()
+
+    def _sync_mirror_widgets(self) -> None:
+        on = self.canvas.is_mirrored
+        if hasattr(self, "mirror_btn"):
+            self.mirror_btn.config(text=f"Mirror: {'ON' if on else 'OFF'}")
+        if hasattr(self, "_mirror_var"):
+            self._mirror_var.set(on)
+
     # ----- "Always show pads" -----------------------------------------------
 
     def _toggle_show_all_pins(self) -> None:
@@ -802,9 +837,10 @@ class ViewerApp(tk.Tk):
 
     def _fit_window_to_toolbar(self) -> None:
         """Widen the initial window when the toolbar's requested width
-        exceeds it (pack never wraps, so the last-packed Rotate buttons
-        would be squeezed or clipped). At 150 % DPI the toolbar needs
-        ~1510 px against the 1500 px default. Capped at the screen
+        exceeds it (pack never wraps, so the last-packed buttons, Mirror
+        first and then Rotate, would be squeezed or clipped). At 200 % DPI
+        the toolbar needs ~1630 px against the 1500 px default (about
+        1510 px before the Mirror button was added). Capped at the screen
         width; deliberately NOT a minsize, so small screens can still
         shrink the window."""
         toolbar = getattr(self, "toolbar", None)

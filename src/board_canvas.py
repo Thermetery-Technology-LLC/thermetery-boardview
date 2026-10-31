@@ -403,8 +403,42 @@ class CanvasCommon:
         return (x, y)
 
 
+    @property
+    def mirror_x(self) -> bool:
+        """The user's Mirror toggle on its own (BOTTOM's automatic flip is
+        not counted; see `is_mirrored` for what is actually drawn)."""
+        return self._mirror_x
+
+
+    @property
+    def is_mirrored(self) -> bool:
+        """True when the board is currently drawn left-right mirrored.
+        BOTTOM mirrors automatically (as if the board were flipped over)
+        and the user's Mirror toggle XORs with that, so BOTTOM + Mirror is
+        drawn un-mirrored again. Same rule as `_apply_view_transform`."""
+        return (self._view_layer == "BOTTOM") ^ self._mirror_x
+
+
+    def set_mirror_x(self, on: bool) -> None:
+        on = bool(on)
+        if on == self._mirror_x:
+            return
+        self._reorient(lambda: setattr(self, "_mirror_x", on))
+
+
     def toggle_mirror_x(self) -> None:
-        self._reorient(lambda: setattr(self, "_mirror_x", not self._mirror_x))
+        self.set_mirror_x(not self._mirror_x)
+
+
+    def _layer_indicator(self) -> str:
+        """Canvas status-line text for the viewed layer, saying whether the
+        view is currently mirrored (inner layers are handled by the callers
+        because they also report ghost-component counts)."""
+        mirrored = self.is_mirrored
+        if self._view_layer == "TOP":
+            return "TOP (mirrored)" if mirrored else "TOP (looking down)"
+        return ("BOTTOM (mirrored, as if board flipped)" if mirrored
+                else "BOTTOM (not mirrored)")
 
 
     def rotate(self, steps: int) -> None:
@@ -1484,7 +1518,8 @@ class BoardCanvasCPU(CanvasCommon, tk.Canvas):
         if is_inner:
             n_layer = len(self.board.components)
             layer_indicator = (
-                f"{self._view_layer} (inner copper, ghost components)"
+                f"{self._view_layer} (inner copper, ghost components"
+                f"{', mirrored' if self.is_mirrored else ''})"
             )
         else:
             # Lazily fill the per-layer count cache. Cached forever
@@ -1495,9 +1530,7 @@ class BoardCanvasCPU(CanvasCommon, tk.Canvas):
                 n_layer = sum(1 for c in self.board.components.values()
                               if c.layer == self._view_layer)
                 self._comp_count_by_layer[self._view_layer] = n_layer
-            layer_indicator = ("TOP (looking down)"
-                               if self._view_layer == "TOP"
-                               else "BOTTOM (mirrored, as if board flipped)")
+            layer_indicator = self._layer_indicator()
         if not self._measure_mode:
             hint_extra = "  •  M=measure"
         else:
@@ -3954,7 +3987,8 @@ if _GL_AVAILABLE:
             if view_is_inner:
                 n_layer = len(self.board.components)
                 layer_indicator = (
-                    f"{self._view_layer} (inner copper, ghost components)"
+                    f"{self._view_layer} (inner copper, ghost components"
+                    f"{', mirrored' if self.is_mirrored else ''})"
                 )
                 comp_label = "ghost components"
             else:
@@ -3967,10 +4001,7 @@ if _GL_AVAILABLE:
                         if c.layer == self._view_layer
                     )
                     self._comp_count_by_layer[self._view_layer] = n_layer
-                layer_indicator = (
-                    "TOP (looking down)" if self._view_layer == "TOP"
-                    else "BOTTOM (mirrored, as if board flipped)"
-                )
+                layer_indicator = self._layer_indicator()
                 comp_label = "components on this layer"
             if not self._measure_mode:
                 hint_extra = "  •  M=measure"

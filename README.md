@@ -136,6 +136,14 @@ CI runs the suite on Windows and Ubuntu for every push and pull request
   out until you zoom into them, and the hint says which sizes are
   hidden. The setting is remembered between runs (`show_all_pins` in
   the config file).
+- **X** (or **View ▸ Mirror view**, or the toolbar **Mirror** button)
+  flips the board left-right. The BOTTOM layer is drawn mirrored
+  automatically, as if the board were turned over, so the button reads
+  *ON* there; pressing it on BOTTOM shows that side un-mirrored, and
+  pressing it on TOP or an inner layer mirrors that view. The choice
+  sticks when you change layer (Mirror on TOP, then BOTTOM, shows BOTTOM
+  un-mirrored). Rotation is
+  separate (**Rotate ↺ / ↻**). Mirror resets when a new board is opened.
 - Slim parts (0402/0603 resistors and capacitors in `.tvw` files) draw
   as real rectangles and can be picked by clicking anywhere on or
   within a few pixels of the body, not just on the refdes label.
@@ -144,7 +152,7 @@ CI runs the suite on Windows and Ubuntu for every push and pull request
   another file, or *Quit*. With an empty recent list the file dialog
   opens directly, as before.
 - **Component / Net search** in the toolbar autocompletes by refdes or
-  net name; **View menu** does mirror-X and 90° rotate.
+  net name; **View menu** does mirror and 90° rotate.
 - **Drag-drop** a boardview file onto the canvas to open it (requires
   the optional `tkinterdnd2`; without it the menu / Ctrl+O picker still
   works).
