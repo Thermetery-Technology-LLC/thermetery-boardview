@@ -46,11 +46,18 @@ Meson-compatible x64 C toolchain. The script finds the MinGW GCC path used by
 this project automatically. For MSVC, run it from an x64 Visual Studio
 Developer shell.
 
-The build Python must bundle Tcl/Tk 8.6. python.org installers do; the
-`actions/setup-python` builds from 3.14.7 on ship Tcl/Tk 9.0 with its script
-library inside a zipfs archive, which the pinned PyInstaller cannot collect,
-and the frozen app then hangs in Tk initialisation (the packaging self-test
-reports it as a 60 s timeout). The release workflow therefore pins 3.14.6.
+Either Tcl/Tk runtime a python.org build ships is supported. Python 3.12 and
+3.13 bundle Tcl/Tk 8.6, whose script library PyInstaller copies into
+`_internal\_tcl_data` and `_tk_data`; Python 3.14.7 and later bundle Tcl/Tk
+9.0, which keeps that library inside `tcl90.dll` and `tcl9tk90.dll` as an
+appended zip archive mounted at `//zipfs:/`, so those folders do not exist.
+The pinned PyInstaller (6.22 or newer) and tkinterdnd2 (0.7.0 or newer, which
+carries Tcl 9 `tkdnd` binaries) handle both; the payload check in
+`build_windows.ps1` accepts either layout and fails only when neither holds
+the runtime data, and the frozen self-test logs the `tcl_tk` patchlevel and
+`tkdnd` version it actually loaded. The release workflow builds on the current
+3.14 (Tcl/Tk 9); locally the script prefers the newest installed Python, so a
+machine with 3.14 builds on Tcl/Tk 9 too.
 
 The default build creates an isolated Python environment and, when needed,
 downloads the signed Inno Setup 6.7.3 compiler into the repository tool cache.

@@ -121,6 +121,10 @@ def _run_packaging_self_test(output: Path) -> int:
         print("self-test: creating Tk root", flush=True)
         root = TkinterDnD.Tk()
         result["checks"]["tcl_tk"] = str(root.tk.call("info", "patchlevel"))
+        # TkinterDnD.Tk() already loaded tkdnd; record which build answered
+        # so the log proves the Tcl-9 (or 8.6) binary matching this
+        # runtime was collected, not merely that the import succeeded.
+        result["checks"]["tkdnd"] = str(root.tk.call("package", "present", "tkdnd"))
         root.withdraw()
         root.update_idletasks()
         root.destroy()
