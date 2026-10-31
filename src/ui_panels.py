@@ -461,6 +461,18 @@ class NetInfoPanel(ttk.Frame):
     def show_net(
         self, net_name: Optional[str], focus_pin: Optional[Tuple[str, str]] = None
     ) -> None:
+        """Fill the view with `net_name`'s nodes, optionally highlighting
+        `focus_pin`. When the same net is already shown the tree is NOT
+        rebuilt — only the highlight moves (see `focus_pin`) — so walking
+        a net's nodes from the Net tab keeps the scroll position and
+        doesn't flicker."""
+        if (net_name and net_name == self.current_net
+                and self.tree.get_children()):
+            if focus_pin:
+                self.focus_pin(*focus_pin)
+            else:
+                self.focus_pin(None, None)
+            return
         self.tree.delete(*self.tree.get_children())
         self._highlighted_pin_iid = None
         if not net_name or net_name not in self.board.signals:
@@ -499,19 +511,33 @@ class NetInfoPanel(ttk.Frame):
                 pass
 
         if focus_pin:
-            ref, pn = focus_pin
-            target = f"{ref}__{pn}"
-            if self.tree.exists(target):
-                cur_tags = list(self.tree.item(target, "tags"))
-                if "highlight" not in cur_tags:
-                    cur_tags.append("highlight")
-                    self.tree.item(target, tags=cur_tags)
-                self._highlighted_pin_iid = target
-                try:
-                    self.tree.see(target)
-                    self.tree.selection_set(target)
-                except tk.TclError:
-                    pass
+            self.focus_pin(*focus_pin)
+
+    def focus_pin(self, refdes: Optional[str], pin: Optional[str]) -> None:
+        """Move the row highlight to (refdes, pin) without rebuilding the
+        tree. Clears the previous highlight; a pair that isn't on the
+        shown net (or None) just clears. Used when the user jumps from
+        one node of the net to the next so the Net tab stays put."""
+        prev = self._highlighted_pin_iid
+        if prev and self.tree.exists(prev):
+            tags = [t for t in self.tree.item(prev, "tags") if t != "highlight"]
+            self.tree.item(prev, tags=tags)
+        self._highlighted_pin_iid = None
+        if not refdes or not pin:
+            return
+        target = f"{refdes}__{pin}"
+        if not self.tree.exists(target):
+            return
+        cur_tags = list(self.tree.item(target, "tags"))
+        if "highlight" not in cur_tags:
+            cur_tags.append("highlight")
+            self.tree.item(target, tags=cur_tags)
+        self._highlighted_pin_iid = target
+        try:
+            self.tree.see(target)
+            self.tree.selection_set(target)
+        except tk.TclError:
+            pass
 
     def _on_click(self, event: tk.Event) -> None:
         item = self.tree.identify_row(event.y)

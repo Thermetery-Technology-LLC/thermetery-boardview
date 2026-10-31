@@ -22,6 +22,8 @@ import androidx.documentfile.provider.DocumentFile
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -54,6 +56,38 @@ class MainActivity : ComponentActivity() {
 
         /** Folder-copy ceiling — an eM-Test set is exactly five files. */
         private const val MAX_ASC_MEMBERS = 64
+
+        /** Extensions the manifest "open with" filters advertise (contract §6).
+         *  The opaque-id (application/octet-stream) filter cannot check the
+         *  name, so handleIncomingUri gates on this list instead. */
+        private val SUPPORTED_EXTENSIONS =
+            setOf("tvw", "fz", "pcb", "cad", "brd", "brd2", "bv", "asc")
+        private const val SUPPORTED_EXTENSIONS_HINT =
+            ".tvw .fz .pcb .cad .brd .brd2 .bv .asc"
+
+        /** What counts as a file extension for the gate: a short
+         *  alphanumeric suffix with at least one letter. "rev1.0",
+         *  "Z4.1" or "820-1234_rev1.01" have a dot but no extension, so
+         *  they fall through to the parser's content sniffing instead of
+         *  being refused. */
+        private val EXTENSION_SHAPE = Regex("^[a-z0-9]{1,5}$")
+
+        /** Ceiling for a single board copied into cacheDir/boards/. The
+         *  opaque-id filter is offered for ANY binary document, and a
+         *  provider that reports no DISPLAY_NAME (so no extension to gate
+         *  on) could otherwise stream a multi-GB video/firmware into the
+         *  cache before the parser rejects it. Real boards are 1–50 MB
+         *  (the sample .tvw files are ~20 MB), so 512 MiB is far above
+         *  anything a parser would accept. */
+        private const val MAX_BOARD_BYTES = 512L * 1024 * 1024
+
+        /** Suffix of a (trimmed) name that the gate treats as its
+         *  extension, lower-cased; "" when the name has no extension. */
+        private fun extensionOf(name: String): String {
+            val suffix = name.substringAfterLast('.', "").lowercase()
+            return if (EXTENSION_SHAPE.matches(suffix) && suffix.any { it.isLetter() }) suffix
+            else ""
+        }
     }
 
     private lateinit var webView: WebView
@@ -116,11 +150,18 @@ class MainActivity : ComponentActivity() {
         setContentView(webView)
         webView.loadUrl("file:///android_asset/viewer.html")
 
-        maybeHandleViewIntent(intent)
+        // Only a fresh launch handles the launching ACTION_VIEW. A recreated
+        // activity (process death; configChanges covers the rest) would
+        // otherwise replay the original intent: re-copy and re-parse the
+        // first board, or repeat a stale "not a supported boardview" error.
+        if (savedInstanceState == null) maybeHandleViewIntent(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        // singleTask: keep getIntent() pointing at the latest delivery so a
+        // later recreation never sees the first, already-consumed URI.
+        setIntent(intent)
         maybeHandleViewIntent(intent)
     }
 
@@ -191,24 +232,57 @@ class MainActivity : ComponentActivity() {
 
     // ------------------------------------------------------------ file open
 
+    /** Called on the UI thread (launch intent, onNewIntent, SAF result).
+     *  Everything that can block on a DocumentsProvider — the
+     *  DISPLAY_NAME/SIZE query, the extension gate that depends on it,
+     *  and the copy — runs on the worker thread: the opaque-id "open
+     *  with" filter routes Drive, browser downloads and other slow or
+     *  remote providers here, and a synchronous query on the main
+     *  thread could ANR. */
     private fun handleIncomingUri(uri: Uri) {
-        val displayName = displayNameFor(uri)
-        if (displayName.substringAfterLast('.', "").lowercase() == "asc") {
-            // A lone member of a directory-shaped eM-Test set: a
-            // single-document grant can't reach the sibling files, so
-            // parsing is guaranteed to fail. Explain and offer the
-            // folder picker instead.
-            runOnUiThread { showAscFolderHint(displayName) }
-            return
-        }
-        postStatus("Parsing $displayName…")
         PythonRuntime.submit {
+            val meta = documentMetadata(uri)
+            val displayName = meta.name
+            val ext = extensionOf(displayName)
+            if (ext == "asc") {
+                // A lone member of a directory-shaped eM-Test set: a
+                // single-document grant can't reach the sibling files, so
+                // parsing is guaranteed to fail. Explain and offer the
+                // folder picker instead.
+                runOnUiThread { showAscFolderHint(displayName) }
+                return@submit
+            }
+            if (ext.isNotEmpty() && ext !in SUPPORTED_EXTENSIONS) {
+                // Reached via the application/octet-stream "open with"
+                // filter, which the system offers for ANY opaque-id binary
+                // document (manifest filter 2). Refuse before copying
+                // anything. A name with no extension (some providers, or a
+                // dotted name like "rev1.0" — see extensionOf) falls
+                // through and the parser content-sniffs it.
+                Log.i(TAG, "Rejecting $displayName: .$ext is not a supported boardview extension")
+                postError("$displayName is not a supported boardview ($SUPPORTED_EXTENSIONS_HINT)")
+                return@submit
+            }
+            if (meta.size != null && meta.size > MAX_BOARD_BYTES) {
+                Log.i(TAG, "Rejecting $displayName: ${meta.size} bytes exceeds the board size ceiling")
+                postError(
+                    "Could not read $displayName: ${meta.size shr 20} MB is larger " +
+                        "than any boardview (limit ${MAX_BOARD_BYTES shr 20} MB)"
+                )
+                return@submit
+            }
+            postStatus("Parsing $displayName…")
             val dest: File = try {
                 val boardsDir = File(cacheDir, "boards").apply { mkdirs() }
                 val f = File(boardsDir, sanitizeFileName(displayName))
-                contentResolver.openInputStream(uri).use { input ->
-                    if (input == null) throw IOException("content stream unavailable")
-                    f.outputStream().use { out -> input.copyTo(out) }
+                try {
+                    contentResolver.openInputStream(uri).use { input ->
+                        if (input == null) throw IOException("content stream unavailable")
+                        f.outputStream().use { out -> copyBounded(input, out, MAX_BOARD_BYTES) }
+                    }
+                } catch (t: Throwable) {
+                    f.delete()   // never leave a truncated board in the cache
+                    throw t
                 }
                 // Kept for the whole session — lazy topology re-reads this
                 // path later. Do NOT delete after parse (contract §6).
@@ -315,25 +389,51 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun displayNameFor(uri: Uri): String {
+    /** DISPLAY_NAME (trimmed, trailing dots dropped) and SIZE of a
+     *  document, or the last URI segment when the provider reports no
+     *  name. Worker thread only — the query can block. */
+    private class DocumentMeta(val name: String, val size: Long?)
+
+    private fun documentMetadata(uri: Uri): DocumentMeta {
+        var name: String? = null
+        var size: Long? = null
         if (uri.scheme == "content") {
             try {
                 contentResolver.query(
-                    uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null,
+                    uri,
+                    arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+                    null, null, null,
                 )?.use { c ->
                     if (c.moveToFirst()) {
-                        val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                        if (idx >= 0) {
-                            c.getString(idx)?.takeIf { it.isNotBlank() }?.let { return it }
-                        }
+                        val ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (ni >= 0) name = c.getString(ni)?.trim()?.trimEnd('.')?.takeIf { it.isNotBlank() }
+                        val si = c.getColumnIndex(OpenableColumns.SIZE)
+                        if (si >= 0 && !c.isNull(si)) size = c.getLong(si).takeIf { it >= 0 }
                     }
                 }
             } catch (t: Throwable) {
-                Log.w(TAG, "DISPLAY_NAME query failed for $uri", t)
+                Log.w(TAG, "DISPLAY_NAME/SIZE query failed for $uri", t)
             }
         }
-        return uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
-            ?: "board"
+        val fallback = uri.lastPathSegment?.substringAfterLast('/')?.trim()?.trimEnd('.')
+            ?.takeIf { it.isNotBlank() } ?: "board"
+        return DocumentMeta(name ?: fallback, size)
+    }
+
+    /** copyTo with a byte ceiling: a provider that lied about (or omitted)
+     *  SIZE still cannot fill the cache. */
+    private fun copyBounded(input: InputStream, out: OutputStream, limit: Long) {
+        val buf = ByteArray(64 * 1024)
+        var total = 0L
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            total += n
+            if (total > limit) {
+                throw IOException("larger than ${limit shr 20} MB, not a boardview")
+            }
+            out.write(buf, 0, n)
+        }
     }
 
     private fun sanitizeFileName(name: String): String =
@@ -341,7 +441,7 @@ class MainActivity : ComponentActivity() {
 
     /** Key slot implied by a filename, before an expensive keyless parse. */
     private fun rememberedKeyFormat(displayName: String): String? =
-        when (displayName.substringAfterLast('.', "").lowercase()) {
+        when (extensionOf(displayName)) {
             "fz" -> "fz"
             "pcb" -> "xzzpcb"
             else -> null

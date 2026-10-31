@@ -144,7 +144,10 @@ how the renderer is developed and tested without Android.
 - Pan (one-finger drag / mouse drag), pinch zoom (+ wheel zoom on desktop),
   double-tap to zoom in, "fit" button. Maintain zoom-to-focal-point math.
 - Tap: select component (nearest within dp-scaled radius; prefer pins when
-  zoomed in). Selection shows an info panel: ref, pin count, and pin→net
+  zoomed in). At a TOP or BOTTOM view the tap resolves to parts/pins on
+  the visible layer first and falls back to ghosted other-layer parts only
+  when nothing on the visible layer is hit (ALL / inner-layer views take
+  any layer). Selection shows an info panel: ref, pin count, and pin→net
   list; tapping a pin/net name highlights that net (all pins on it + its
   segments in bright color, everything else dimmed).
 - Layer cycle button (TOP/BOTTOM/inner when present): components on other
@@ -152,6 +155,25 @@ how the renderer is developed and tested without Android.
   all layers.
 - View rotation: two toolbar buttons rotate the view in 90-degree steps
   (state threaded through fit/hit-test/rasterize).
+- View mirror, matching the desktop viewer: the BOTTOM layer (index 1) is
+  shown mirrored about the board's x extent ("as if the board were flipped
+  over"); a `Mirror` toolbar button (`#bv-btn-mirror`) toggles a user
+  mirror that is XORed with the BOTTOM auto-mirror
+  (`mirrored = (layerIdx === 1) ^ userMirror`), so Mirror at BOTTOM shows
+  it un-mirrored and Mirror at ALL/TOP shows them mirrored. The mirror is
+  applied in world space before the view rotation. The button's `.on`
+  state reflects the effective mirror; toggling mirror or cycling the layer
+  keeps the world point under the viewport centre in place (a drag in
+  progress continues from the new position). Centring on a part/pin and
+  "Fit" account for the view rotation, so the target lands on the intended
+  screen point at any rotation. `board_export` bakes no mirror into
+  coordinates. User mirror resets on each new board. The Mirror button sits
+  between Fit and the rotate buttons so it is visible without scrolling
+  the strip on a 375 px-wide phone.
+- Selection panel tabs: canvas pin tap → Net tab (net highlighted); body
+  tap → Pins tab. Tapping a Net-tab row jumps to that member (centred on
+  the pin, row marked selected) and stays on the Net tab with the same net
+  highlight; the Pins tab is updated silently.
 - Traces toggle button: first press calls `Android.loadTraces()` (or loads
   from the dev-harness JSON if it already has segments).
 - Search box with prefix autocomplete over refdes and nets (datalist is fine).
@@ -167,8 +189,28 @@ how the renderer is developed and tested without Android.
 - Single activity, fullscreen WebView (assets served from
   `file:///android_asset/viewer.html` or WebViewAssetLoader — either is fine,
   JS needs no network). `addJavascriptInterface(bridge, "Android")`.
-- SAF `ACTION_OPEN_DOCUMENT` (+ manifest intent filters for
-  `.tvw/.fz/.pcb/.cad/.brd/.brd2/.bv` opened from file managers). Copy the
+- SAF `ACTION_OPEN_DOCUMENT` + two manifest `ACTION_VIEW` intent filters so
+  the app is offered as "open with" for
+  `.tvw/.fz/.pcb/.cad/.brd/.brd2/.bv/.asc`: (1) a `pathPattern` filter
+  (`file`/`content`, `*/*`) for URIs that carry the file name in their
+  path, and (2) a `content` + `application/octet-stream` filter with no
+  host/pathPattern for opaque-id documents (Downloads root `msf:<id>`,
+  Drive, browser/messenger downloads), which no pathPattern can match.
+  Filter 1 needs the intent to carry a type (inferred from the provider
+  for `content://`; a `file://` sender must set one). Filter 2 covers the
+  extensions Android has no MIME mapping for (typed
+  `application/octet-stream`); `.asc` has a `MimeTypeMap` mapping, so it
+  is not typed octet-stream and an opaque-id `.asc` is not offered (moot — a lone `.asc` only shows the
+  folder hint), and a sender-supplied type such as `application/zip` is
+  not matched. Since filter 2 fires for any opaque-id binary document,
+  `handleIncomingUri` gates on the trimmed `DISPLAY_NAME` extension — a
+  1–5 character alphanumeric suffix containing a letter (unsupported
+  extension → error toast, nothing copied; no extension, including dotted
+  names like `rev1.0` → parser content-sniffs) — refuses documents over
+  512 MiB (`SIZE`, plus a bounded copy), and does the name/size query, the
+  gate and the copy on the worker thread, never the UI thread. A user who
+  picks Boardview with "Always" for an unrelated binary must clear the
+  default in app settings (documented in `android/README.md`). Copy the
   content stream to `cacheDir/boards/<displayName>` — **keep it for the whole
   session** (lazy topology re-reads the path later; do not delete after parse).
 - Python startup in `Application.onCreate` on a background thread
@@ -198,13 +240,15 @@ how the renderer is developed and tested without Android.
   DLLs.)
 - minSdk 24, targetSdk 35, versionName from repo git describe if easy, else
   hardcode `0.1.0`.
-- Local toolchain on this machine: JDK `C:\Android\jdk-17.0.19+10`, Gradle
-  `C:\Android\gradle-8.10.2\bin\gradle.bat`, SDK `C:\Android\sdk`
-  (build-tools 34/35, platform android-35). Chaquopy 17 requires
-  buildPython's minor version to match the target (3.13):
-  `C:/Users/Administrator/AppData/Local/Python/pythoncore-3.13-64/python.exe`
-  (the older anaconda 3.11 does not work). No Gradle wrapper needed —
-  invoke the local Gradle directly with `-p android`.
+- Local toolchain: JDK 17 (`JAVA_HOME`), Gradle 8.10 invoked directly with
+  `-p android` (no wrapper), an Android SDK located via `sdk.dir` in the
+  gitignored `android/local.properties` (falling back to `ANDROID_HOME`
+  when that file is absent), and a CPython 3.13 for
+  Chaquopy's `buildPython` — Chaquopy 17 requires buildPython's minor
+  version to match the target (3.13); the older anaconda 3.11 does not
+  work. `app/build.gradle.kts` resolves it from `CHAQUOPY_BUILD_PYTHON`,
+  else `py -3.13` on Windows, else `python3.13`; nothing machine-specific
+  is hardcoded. Full instructions: `android/README.md`.
 
 ## 7. What v1 explicitly does NOT include
 

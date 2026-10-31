@@ -14,6 +14,7 @@ import traceback
 APP_USER_MODEL_ID = "ThermeteryTechnology.ThermeteryBoardviewer"
 SELF_TEST_FLAG = "--packaging-self-test"
 SELF_TEST_OUTPUT_ENV = "BOARDVIEWER_SELF_TEST_OUTPUT"
+SELF_TEST_HANG_SECONDS = 45  # under build_windows.ps1's 60 s self-test timeout
 _LOG_STREAM = None
 
 
@@ -75,6 +76,8 @@ def _write_self_test_result(path: Path, result: dict) -> None:
 
 def _run_packaging_self_test(output: Path) -> int:
     """Exercise imports, Tcl/Tk data, writable storage, and every native DLL."""
+    import faulthandler
+
     from src.runtime_paths import managed_data_dir, portable_mode, private_dir
 
     result = {
@@ -84,16 +87,30 @@ def _run_packaging_self_test(output: Path) -> int:
         "private_dir": str(private_dir()),
         "checks": {},
     }
+    # If a check wedges (a Tcl/Tk init that never returns, a modal error
+    # dialog raised by a system DLL) the build script only sees its 60 s
+    # timeout. Dump every thread's stack into the log stream first, then
+    # exit, so the log names the hanging call.
+    hang_log = sys.stderr if sys.stderr is not None else _LOG_STREAM
     try:
+        faulthandler.dump_traceback_later(
+            SELF_TEST_HANG_SECONDS, repeat=False, file=hang_log, exit=True
+        )
+    except (AttributeError, OSError, ValueError):
+        pass
+    try:
+        print("self-test: importing numpy", flush=True)
         import numpy
 
         result["checks"]["numpy"] = numpy.__version__
 
+        print("self-test: importing skia", flush=True)
         import skia
 
         skia.Surface(2, 2)
         result["checks"]["skia"] = getattr(skia, "__version__", "imported")
 
+        print("self-test: importing PyOpenGL / pyopengltk", flush=True)
         from OpenGL import GL  # noqa: F401
         import pyopengltk.win32  # noqa: F401
 
@@ -101,7 +118,9 @@ def _run_packaging_self_test(output: Path) -> int:
 
         from tkinterdnd2 import TkinterDnD
 
+        print("self-test: creating Tk root", flush=True)
         root = TkinterDnD.Tk()
+        result["checks"]["tcl_tk"] = str(root.tk.call("info", "patchlevel"))
         root.withdraw()
         root.update_idletasks()
         root.destroy()
@@ -121,6 +140,7 @@ def _run_packaging_self_test(output: Path) -> int:
             raise RuntimeError(f"native library check failed: {missing}")
         result["checks"].update(native)
 
+        print("self-test: importing src.viewer", flush=True)
         from src import viewer  # noqa: F401
 
         result["checks"]["viewer"] = True
@@ -137,6 +157,8 @@ def _run_packaging_self_test(output: Path) -> int:
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: {exc}"
         result["traceback"] = traceback.format_exc()
+    finally:
+        faulthandler.cancel_dump_traceback_later()
 
     _write_self_test_result(output, result)
     return 0 if result["ok"] else 1

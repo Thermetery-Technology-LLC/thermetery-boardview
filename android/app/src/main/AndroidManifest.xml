@@ -23,10 +23,49 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- Board files opened from file managers (contract §6):
-                 .tvw .fz .pcb .cad .brd .brd2 .bv
-                 pathPattern globs are non-greedy, so each extension gets
-                 extra-dot variants to match names like "rev1.01.tvw". -->
+            <!-- "Open with" from file managers (contract §6). Two filters:
+
+                 1. Name-pattern filter (below): matches when the file name is
+                    in the URI path — file:// URIs, and content:// URIs
+                    whose document id embeds the path (e.g. the
+                    ExternalStorageProvider's "primary:Download/x.tvw").
+                    Covers .tvw .fz .pcb .cad .brd .brd2 .bv .asc.
+                    pathPattern globs are non-greedy, so each extension gets
+                    extra-dot variants to match names like "rev1.01.tvw".
+                    (.asc: a lone member of a directory-shaped eM-Test set
+                    cannot parse alone; MainActivity shows a hint that routes
+                    to the folder picker.)
+                    Because the filter declares a mimeType, it matches only
+                    when the intent carries a type: the resolver infers one
+                    from the provider for content:// URIs (ContentResolver
+                    .getType), but a file:// intent needs the sender to set
+                    it (file managers normally do). A type-less VIEW intent,
+                    or a provider whose getType returns null, matches neither
+                    filter. No separate type-less or pathPattern-less file://
+                    twin is declared: apps targeting API 24+ cannot expose
+                    file:// URIs at all (FileUriExposedException), so that
+                    route is legacy, and a file:// path always ends in the
+                    file name, which filter 1 already matches.
+
+                 2. Opaque-id filter (further below): the Downloads root
+                    (msf:<id>), Google Drive, Chrome/Discord/Telegram
+                    downloads and many file managers hand out content://
+                    URIs with an opaque document id, so no pathPattern can
+                    match. Extensions the system has no MIME mapping for
+                    (.tvw .fz .pcb .cad .brd .brd2 .bv) are typed
+                    application/octet-stream; we accept that MIME type for
+                    any content:// URI and MainActivity.handleIncomingUri
+                    gates on the DISPLAY_NAME extension instead (unsupported
+                    extension -> error, no copy/parse; no extension at all ->
+                    the parser content-sniffs). Known gaps: .asc has a
+                    MimeTypeMap mapping, so it is not typed octet-stream and
+                    an opaque-id .asc is not offered — moot, since a lone .asc only ever shows the
+                    folder hint; and a sender that supplies some other type
+                    (application/zip, a vendor type) is not matched either.
+                    Side effect: the chooser lists Boardview for EVERY
+                    opaque-id binary; a user who picks "Always" makes it the
+                    default for all of them and must clear it under
+                    Settings > Apps > Boardview > Open by default. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -55,12 +94,20 @@
                 <data android:pathPattern=".*\\.bv" />
                 <data android:pathPattern=".*\\..*\\.bv" />
                 <data android:pathPattern=".*\\..*\\..*\\.bv" />
-                <!-- Single .asc members can't parse alone (the board is
-                     the whole folder); MainActivity shows a hint that
-                     routes to the folder picker. -->
                 <data android:pathPattern=".*\\.asc" />
                 <data android:pathPattern=".*\\..*\\.asc" />
                 <data android:pathPattern=".*\\..*\\..*\\.asc" />
+            </intent-filter>
+
+            <!-- Filter 2 (see the comment above): opaque-id content://
+                 documents typed application/octet-stream. Deliberately no
+                 host or pathPattern — the name is not in the URI; the
+                 extension gate lives in MainActivity.handleIncomingUri. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:mimeType="application/octet-stream" />
             </intent-filter>
         </activity>
 

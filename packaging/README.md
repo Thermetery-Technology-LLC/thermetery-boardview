@@ -46,6 +46,12 @@ Meson-compatible x64 C toolchain. The script finds the MinGW GCC path used by
 this project automatically. For MSVC, run it from an x64 Visual Studio
 Developer shell.
 
+The build Python must bundle Tcl/Tk 8.6. python.org installers do; the
+`actions/setup-python` builds from 3.14.7 on ship Tcl/Tk 9.0 with its script
+library inside a zipfs archive, which the pinned PyInstaller cannot collect,
+and the frozen app then hangs in Tk initialisation (the packaging self-test
+reports it as a 60 s timeout). The release workflow therefore pins 3.14.6.
+
 The default build creates an isolated Python environment and, when needed,
 downloads the signed Inno Setup 6.7.3 compiler into the repository tool cache.
 Pass `-NoBootstrap` in an already provisioned or network-restricted environment.

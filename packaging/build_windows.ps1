@@ -189,6 +189,19 @@ function Assert-ReleasePayload([string]$PayloadDir) {
             throw "Frozen payload is incomplete: $path"
         }
     }
+    # PyInstaller's tkinter run-time hook aborts at startup when these are
+    # missing, and the windowed bootloader shows that as a modal error box,
+    # so fail here with the cause instead of at the self-test timeout. The
+    # usual reason is a build Python whose Tcl/Tk 9 keeps its script library
+    # in a zipfs archive that this PyInstaller cannot collect (see README).
+    foreach ($dir in @("_internal\_tcl_data", "_internal\_tk_data")) {
+        $dataDir = Join-Path $PayloadDir $dir
+        if (-not (Test-Path -LiteralPath $dataDir -PathType Container) -or
+            -not (Get-ChildItem -LiteralPath $dataDir -Force | Select-Object -First 1)) {
+            throw "Frozen payload has no Tcl/Tk runtime data at $dataDir. " +
+                  "The build Python must bundle Tcl/Tk 8.6 (see packaging/README.md)."
+        }
+    }
     if (Test-Path -LiteralPath (Join-Path $PayloadDir "portable.flag")) {
         throw "The canonical installer payload unexpectedly contains portable.flag."
     }
@@ -203,6 +216,36 @@ function Assert-ReleasePayload([string]$PayloadDir) {
     if ($bad) {
         $listed = ($bad | ForEach-Object FullName) -join [Environment]::NewLine
         throw "Forbidden private keys or board files entered the release payload:`n$listed"
+    }
+}
+
+function Write-FrozenSelfTestLog {
+    # Surface everything the frozen process wrote so a CI failure shows its
+    # own output: the redirected stdout/stderr files (anything printed before
+    # or instead of the entry script's own log) and boardviewer.log under the
+    # data directory (LOCALAPPDATA for the installed layout, <payload>\data
+    # for portable), which carries the faulthandler stack dump of a hung check.
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string[]]$Roots
+    )
+    $logs = @()
+    foreach ($root in $Roots) {
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
+        foreach ($name in @("boardviewer.log", "self-test-stdout.txt", "self-test-stderr.txt")) {
+            $logs += Get-ChildItem -LiteralPath $root -Recurse -Force -Filter $name `
+                -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 0 }
+        }
+    }
+    if (-not $logs) {
+        Write-Host "$Label frozen self-test left no log output under: $($Roots -join '; ')"
+        return
+    }
+    foreach ($log in $logs) {
+        Write-Host "----- $Label frozen self-test log: $($log.FullName) -----"
+        Get-Content -LiteralPath $log.FullName -Encoding UTF8 -ErrorAction SilentlyContinue |
+            Select-Object -Last 200 | ForEach-Object { Write-Host $_ }
+        Write-Host "----- end of $($log.Name) -----"
     }
 }
 
@@ -236,16 +279,32 @@ function Invoke-FrozenSelfTest {
         Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
         $env:LOCALAPPDATA = Join-Path $testRoot "local app data"
         $env:BOARDVIEWER_SELF_TEST_OUTPUT = $diagnostics
+        # A windowed exe has no console, so without these redirects anything
+        # the bootloader or the entry script prints before boardviewer.log is
+        # opened (import errors, run-time hook failures) is lost.
         $process = Start-Process -FilePath $exe `
             -ArgumentList "--packaging-self-test" `
             -WorkingDirectory $testRoot `
             -WindowStyle Hidden `
+            -RedirectStandardOutput (Join-Path $testRoot "self-test-stdout.txt") `
+            -RedirectStandardError (Join-Path $testRoot "self-test-stderr.txt") `
             -PassThru
+        $timedOut = $false
         if (-not $process.WaitForExit(60000)) {
+            # A modal dialog (bootloader error box, Tcl panic) is the usual
+            # reason a self-test never returns: name it before killing.
+            try {
+                $process.Refresh()
+                $title = $process.MainWindowTitle
+                Write-Host "$Label frozen self-test still running after 60 s; main window title: '$title'"
+            } catch {
+                Write-Host "$Label frozen self-test still running after 60 s (window title unavailable)"
+            }
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            throw "$Label frozen self-test timed out after 60 seconds."
+            $timedOut = $true
+        } else {
+            $process.Refresh()
         }
-        $process.Refresh()
     } finally {
         $env:Path = $oldPath
         if ($null -eq $oldData) {
@@ -280,13 +339,21 @@ function Invoke-FrozenSelfTest {
         }
     }
 
+    $logRoots = @($testRoot, (Join-Path $PayloadDir "data"))
+    if ($timedOut) {
+        Write-FrozenSelfTestLog -Label $Label -Roots $logRoots
+        throw "$Label frozen self-test timed out after 60 seconds."
+    }
     if (-not (Test-Path -LiteralPath $diagnostics -PathType Leaf)) {
+        Write-FrozenSelfTestLog -Label $Label -Roots $logRoots
         throw "$Label frozen self-test did not produce diagnostics (exit $($process.ExitCode))."
     }
     $result = Get-Content -LiteralPath $diagnostics -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($process.ExitCode -ne 0 -or -not $result.ok) {
+        Write-FrozenSelfTestLog -Label $Label -Roots $logRoots
         throw "$Label frozen self-test failed: $($result.error)"
     }
+    Write-Host "$Label frozen self-test checks: $($result.checks | ConvertTo-Json -Compress)"
     if ([bool]$result.portable -ne $ExpectedPortable) {
         throw "$Label reported portable=$($result.portable), expected $ExpectedPortable."
     }

@@ -68,7 +68,9 @@ def _remember_board_opened(board: Path) -> None:
     config = _load_config()
     config["last_dir"] = str(board.parent if board.is_file() else board)
     recent = [r for r in config.get("recent", []) if isinstance(r, str)]
-    s = str(board)
+    # Store the absolute form so the same board opened via a relative CLI
+    # argument and via the file dialog is one recent entry, not two.
+    s = str(board.resolve()) if board.exists() else str(board)
     if s in recent:
         recent.remove(s)
     recent.insert(0, s)
@@ -84,7 +86,9 @@ def _get_recent() -> List[str]:
 def _add_recent(board: Path) -> None:
     config = _load_config()
     recent = [r for r in config.get("recent", []) if isinstance(r, str)]
-    s = str(board)
+    # Store the absolute form so the same board opened via a relative CLI
+    # argument and via the file dialog is one recent entry, not two.
+    s = str(board.resolve()) if board.exists() else str(board)
     if s in recent:
         recent.remove(s)
     recent.insert(0, s)
@@ -96,6 +100,33 @@ def _clear_recent_persisted() -> None:
     config = _load_config()
     config["recent"] = []
     _save_config(config)
+
+
+def _load_show_all_pins() -> bool:
+    """Persisted "Always show pads" toggle (config key `show_all_pins`).
+    Default off."""
+    return bool(_load_config().get("show_all_pins", False))
+
+
+def _remember_show_all_pins(on: bool) -> None:
+    config = _load_config()
+    config["show_all_pins"] = bool(on)
+    _save_config(config)
+
+
+# File-dialog filter list. Single source of truth for File > Open and
+# the startup launcher's Browse button (the launcher used to carry a
+# shorter copy that lacked *.asc).
+_BOARD_FILETYPES = [
+    ("Boardview", "*.cad *.brd *.brd2 *.bv *.tvw *.fz *.pcb *.asc"),
+    ("GENCAD", "*.cad"),
+    ("OpenBoardView ASCII", "*.brd *.brd2 *.bv"),
+    ("Teboview", "*.tvw"),
+    ("Allegro Extracta (ASRock / ASUS)", "*.fz"),
+    ("XZZPCB (MSI / repair shops)", "*.pcb"),
+    ("eM-Test Expert ICT set (pick any member)", "*.asc"),
+    ("All files", "*.*"),
+]
 
 
 # ----- Main app -----------------------------------------------------------
@@ -112,6 +143,7 @@ class ViewerApp(tk.Tk):
         self._build_pin_to_net()
 
         self._build_ui()
+        self._fit_window_to_toolbar()
 
         self.bind("<Home>", lambda e: self._safe(self.canvas.reset_view))
         self.bind("l", lambda e: self._safe(self._toggle_layer))
@@ -120,6 +152,10 @@ class ViewerApp(tk.Tk):
         self.bind("T", lambda e: self._safe(self._toggle_traces))
         self.bind("m", lambda e: self._safe(self._toggle_measure))
         self.bind("M", lambda e: self._safe(self._toggle_measure))
+        self.bind("p", lambda e: self._safe(self._toggle_show_all_pins))
+        self.bind("P", lambda e: self._safe(self._toggle_show_all_pins))
+        self.bind("x", lambda e: self._safe(self._toggle_mirror))
+        self.bind("X", lambda e: self._safe(self._toggle_mirror))
         self.bind("<Escape>", lambda e: self._safe(self._on_escape))
         self.bind("<Control-o>", lambda e: self._menu_open_board())
         self.bind("<Control-O>", lambda e: self._menu_open_board())
@@ -135,6 +171,9 @@ class ViewerApp(tk.Tk):
             _add_recent(board_path)
         self._rebuild_recent_menu()
         self._count_board_layers()
+        # Restore the persisted "Always show pads" toggle (default off).
+        # After _count_board_layers: it refreshes the status bar.
+        self._set_show_all_pins(_load_show_all_pins(), persist=False)
         self._update_status()
 
         # Drag-drop wiring goes last so all targets exist. Failure to
@@ -268,9 +307,25 @@ class ViewerApp(tk.Tk):
                               command=self._toggle_traces)
         view_menu.add_command(label="Toggle measure (M)",
                               command=self._toggle_measure)
+        # "Always show pads": pin dots for every component on the viewed
+        # layer, and any pad is a one-click component+pin pick. The
+        # BooleanVar mirrors canvas.show_all_pins (kept in sync by
+        # `_sync_pads_widgets`); the menu entry itself drives the toggle.
+        self._pads_var = tk.BooleanVar(value=False)
+        view_menu.add_checkbutton(label="Always show pads", accelerator="P",
+                                  variable=self._pads_var,
+                                  command=self._on_pads_menu_pick)
         view_menu.add_separator()
-        view_menu.add_command(label="Mirror X",
-                              command=lambda: self.canvas.toggle_mirror_x())
+        # "Mirror view": flips the board left-right. The check shows what
+        # is drawn now, so on BOTTOM (which mirrors automatically, as if
+        # the board were turned over) it is ticked, and unticking it shows
+        # the bottom side without the flip. Kept in sync by
+        # `_sync_mirror_widgets`, which `_sync_layer_widgets` calls on
+        # every layer change.
+        self._mirror_var = tk.BooleanVar(value=False)
+        view_menu.add_checkbutton(label="Mirror view", accelerator="X",
+                                  variable=self._mirror_var,
+                                  command=self._toggle_mirror)
         view_menu.add_command(label="Rotate 90°  CCW",
                               command=lambda: self.canvas.rotate(1))
         view_menu.add_command(label="Rotate 90°  CW",
@@ -298,7 +353,7 @@ class ViewerApp(tk.Tk):
             get_candidates=self._comp_candidates,
             on_submit=self._on_component_search_pick,
             placeholder="(refdes)",
-            width=18,
+            width=15,
         )
         self.comp_search.pack(side="left", padx=(0, 12))
 
@@ -308,7 +363,7 @@ class ViewerApp(tk.Tk):
             get_candidates=self._net_candidates,
             on_submit=self._on_net_search_pick,
             placeholder="(net name)",
-            width=22,
+            width=18,
         )
         self.net_search.pack(side="left", padx=(0, 12))
 
@@ -340,6 +395,17 @@ class ViewerApp(tk.Tk):
         self.measure_btn = ttk.Button(toolbar, text="Measure: OFF",
                                       command=self._toggle_measure, width=14)
         self.measure_btn.pack(side="right", padx=(4, 0))
+        # "Always show pads" toggle, same style as Traces / Measure.
+        # Label tracks canvas.show_all_pins via `_sync_pads_widgets`.
+        # Narrower than its neighbours (the label is shorter); at high
+        # DPI the toolbar can still outgrow the default 1500 px window,
+        # which `_fit_window_to_toolbar` corrects once the toolbar has
+        # its requested size.
+        self.pads_btn = ttk.Button(toolbar, text="Pads: OFF",
+                                   command=self._toggle_show_all_pins,
+                                   width=10)
+        self.pads_btn.pack(side="right", padx=(4, 0))
+        self.toolbar = toolbar
         self.reset_btn = ttk.Button(toolbar, text="Reset view",
                                     command=lambda: self.canvas.reset_view())
         self.reset_btn.pack(side="right", padx=(4, 0))
@@ -357,6 +423,14 @@ class ViewerApp(tk.Tk):
             toolbar, text="Rotate ↺", width=10,
             command=lambda: self.canvas.rotate(1))
         self.rotate_ccw_btn.pack(side="right", padx=(4, 0))
+        # Mirror toggle, same ON/OFF style as Traces / Measure / Pads. ON
+        # means the view is drawn mirrored right now, so it reads ON on
+        # BOTTOM (automatic flip) until the user turns it off; see
+        # `_sync_mirror_widgets`. Packed after the rotate buttons so it
+        # lands on their left, the same order as the Android toolbar.
+        self.mirror_btn = ttk.Button(toolbar, text="Mirror: OFF",
+                                     command=self._toggle_mirror, width=11)
+        self.mirror_btn.pack(side="right", padx=(4, 0))
 
         # Main paned layout: left = info tabs, right = board canvas
         paned = ttk.Panedwindow(self, orient="horizontal")
@@ -416,16 +490,7 @@ class ViewerApp(tk.Tk):
     def _menu_open_board(self) -> None:
         path = filedialog.askopenfilename(
             title="Open boardview",
-            filetypes=[
-                ("Boardview", "*.cad *.brd *.brd2 *.bv *.tvw *.fz *.pcb *.asc"),
-                ("GENCAD", "*.cad"),
-                ("OpenBoardView ASCII", "*.brd *.brd2 *.bv"),
-                ("Teboview", "*.tvw"),
-                ("Allegro Extracta (ASRock / ASUS)", "*.fz"),
-                ("XZZPCB (MSI / repair shops)", "*.pcb"),
-                ("eM-Test Expert ICT set (pick any member)", "*.asc"),
-                ("All files", "*.*"),
-            ],
+            filetypes=_BOARD_FILETYPES,
             initialdir=_last_dir() or ".",
         )
         if not path:
@@ -636,6 +701,13 @@ class ViewerApp(tk.Tk):
         self.canvas.select_pin(pin, center=True)
 
     def _on_net_panel_jump(self, refdes: str, pin: str) -> None:
+        """Net-tab row click: centre the canvas on that pin (auto-flipping
+        layer), update the Component panel in the background, and STAY
+        on the Net tab with the jumped row highlighted — so the user can
+        walk every node of a net without clicking back to the Net tab
+        each time. (`select_pin` fires `_on_canvas_pin_select`, whose
+        `show_net` call takes the same-net no-rebuild path, so the list
+        keeps its scroll position.)"""
         comp = self.board.components.get(refdes)
         if comp and comp.layer != self.canvas.view_layer:
             self.canvas.set_view_layer(comp.layer)
@@ -643,7 +715,8 @@ class ViewerApp(tk.Tk):
         self.canvas.select_pin(pin, center=True)
         self.comp_panel.show_component(refdes)
         self.comp_panel.highlight_pin(pin)
-        self.info_tabs.select(self.comp_panel)
+        self.net_panel.focus_pin(refdes, pin)
+        self.info_tabs.select(self.net_panel)
         self._update_status()
 
     # ----- view menu --------------------------------------------------------
@@ -669,7 +742,9 @@ class ViewerApp(tk.Tk):
         """Refresh the toolbar layer dropdown / button label after a
         layer change. Called from both the L-key cycle and any callback
         path that might mutate `view_layer` (component-pick auto-flip,
-        net-jump auto-flip, board reload)."""
+        net-jump auto-flip, board reload). Also refreshes the Mirror
+        widgets: moving onto or off BOTTOM flips the effective mirror."""
+        self._sync_mirror_widgets()
         if hasattr(self, "layer_combo") and self.layer_combo is not None:
             layers = available_layers_for(self.canvas.board)
             current_values = list(self.layer_combo["values"])
@@ -718,6 +793,72 @@ class ViewerApp(tk.Tk):
         if self.canvas.measure_mode:
             self.canvas.clear_measurement()
 
+    # ----- Mirror ------------------------------------------------------------
+
+    def _toggle_mirror(self) -> None:
+        """X key / toolbar button / View menu: flip the view left-right."""
+        self.canvas.toggle_mirror_x()
+        self._sync_mirror_widgets()
+        self._update_status()
+
+    def _sync_mirror_widgets(self) -> None:
+        on = self.canvas.is_mirrored
+        if hasattr(self, "mirror_btn"):
+            self.mirror_btn.config(text=f"Mirror: {'ON' if on else 'OFF'}")
+        if hasattr(self, "_mirror_var"):
+            self._mirror_var.set(on)
+
+    # ----- "Always show pads" -----------------------------------------------
+
+    def _toggle_show_all_pins(self) -> None:
+        """P key / toolbar button / View menu: flip the all-pins overlay."""
+        self._set_show_all_pins(not self.canvas.show_all_pins)
+
+    def _on_pads_menu_pick(self) -> None:
+        # The checkbutton has already flipped its BooleanVar; push that
+        # state into the canvas (and the config file).
+        self._set_show_all_pins(bool(self._pads_var.get()))
+
+    def _set_show_all_pins(self, on: bool, *, persist: bool = True) -> None:
+        """Apply the toggle to the canvas, mirror it on the toolbar button
+        and View-menu check, and persist it (unless restoring from config)."""
+        self.canvas.set_show_all_pins(on)
+        self._sync_pads_widgets()
+        if persist:
+            _remember_show_all_pins(on)
+        self._update_status()
+
+    def _sync_pads_widgets(self) -> None:
+        on = self.canvas.show_all_pins
+        if hasattr(self, "pads_btn"):
+            self.pads_btn.config(text=f"Pads: {'ON' if on else 'OFF'}")
+        if hasattr(self, "_pads_var"):
+            self._pads_var.set(on)
+
+    def _fit_window_to_toolbar(self) -> None:
+        """Widen the initial window when the toolbar's requested width
+        exceeds it (pack never wraps, so the last-packed buttons, Mirror
+        first and then Rotate, would be squeezed or clipped). At 200 % DPI
+        the toolbar needs ~1630 px against the 1500 px default (about
+        1510 px before the Mirror button was added). Capped at the screen
+        width; deliberately NOT a minsize, so small screens can still
+        shrink the window."""
+        toolbar = getattr(self, "toolbar", None)
+        if toolbar is None:
+            return
+        self.update_idletasks()
+        need = toolbar.winfo_reqwidth() + 2 * 4  # paned/pack side margins
+        try:
+            cur_w, cur_h = (int(v) for v in
+                            self.geometry().split("+")[0].split("x"))
+        except ValueError:
+            return
+        if need <= cur_w:
+            return
+        new_w = min(need, max(cur_w, self.winfo_screenwidth() - 40))
+        if new_w > cur_w:
+            self.geometry(f"{new_w}x{cur_h}")
+
     # ----- status / about ---------------------------------------------------
 
     def _count_board_layers(self) -> None:
@@ -751,6 +892,8 @@ class ViewerApp(tk.Tk):
         ]
         if sel:
             bits.append(f"selected: {sel}" + (f" pin {pin}" if pin else ""))
+        if self.canvas.show_all_pins:
+            bits.append("pads: always shown")
         # Measurement readout. Three states:
         #   * mode on, 0 pts placed     -> "measure: click first point"
         #   * mode on, 1 pt + hover     -> "measure: <distance> (preview)"
@@ -968,6 +1111,200 @@ class KeyManagerDialog(tk.Toplevel):
         self._set_status(fmt, "Cleared." if had else "Not set.", "neutral")
 
 
+# ----- Startup launcher ---------------------------------------------------
+
+_LAUNCHER_TITLE = "Thermetery Boardviewer"
+
+
+def _launcher_rows(recent: List[str]) -> List[Tuple[Path, bool]]:
+    """(path, exists) for each recent entry, in recent order. Pure helper
+    so the launcher's row model is testable without a display."""
+    rows: List[Tuple[Path, bool]] = []
+    for item in recent:
+        p = Path(item)
+        try:
+            exists = p.is_file()
+        except OSError:
+            exists = False
+        rows.append((p, exists))
+    return rows
+
+
+class StartupLauncher:
+    """Small window shown at startup when no board path was given and
+    the recent list is non-empty: a "Recent boards" list (file name +
+    folder column, missing files greyed out), Open selected / Browse… /
+    Quit. Double-click or Enter opens the highlighted entry; Escape or
+    the window close button quits. Built straight on a `tk.Tk` root the
+    caller owns and destroys before `ViewerApp` (a second `tk.Tk`) is
+    created."""
+
+    def __init__(self, root: tk.Tk, recent: List[str]):
+        self.root = root
+        self.result: Optional[Path] = None
+        self._rows = _launcher_rows(recent)
+        root.title(_LAUNCHER_TITLE)
+        root.minsize(560, 320)
+        root.protocol("WM_DELETE_WINDOW", self._quit)
+        self._build()
+        self._center()
+
+    def _build(self) -> None:
+        outer = ttk.Frame(self.root, padding=12)
+        outer.pack(fill="both", expand=True)
+        ttk.Label(outer, text=_LAUNCHER_TITLE,
+                  font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        ttk.Label(outer, foreground="#666666",
+                  text="Recent boards — double-click or press Enter to open, "
+                       "Browse… for another file.").pack(anchor="w",
+                                                         pady=(0, 8))
+        tree_frame = ttk.Frame(outer)
+        tree_frame.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(tree_frame, columns=("folder",),
+                                 show="tree headings", selectmode="browse",
+                                 height=10)
+        self.tree.heading("#0", text="File")
+        self.tree.heading("folder", text="Folder")
+        self.tree.column("#0", width=320, stretch=False, anchor="w")
+        self.tree.column("folder", width=380, stretch=True, anchor="w")
+        self.tree.tag_configure("missing", foreground="#9a9a9a")
+        sb = ttk.Scrollbar(tree_frame, orient="vertical",
+                           command=self.tree.yview)
+        self.tree.config(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.tree.pack(side="left", fill="both", expand=True)
+        first_ok: Optional[str] = None
+        for i, (path, exists) in enumerate(self._rows):
+            iid = str(i)
+            self.tree.insert(
+                "", "end", iid=iid,
+                text=path.name if exists else f"{path.name}  (missing)",
+                values=(str(path.parent),),
+                tags=() if exists else ("missing",),
+            )
+            if exists and first_ok is None:
+                first_ok = iid
+        if first_ok is not None:
+            self.tree.selection_set(first_ok)
+            self.tree.focus(first_ok)
+        # Double-click opens only when it lands on a row: a double-click
+        # on a heading (resizing a column) or on the blank area below
+        # the rows must not launch the preselected board.
+        self.tree.bind("<Double-1>", self._on_tree_double_click)
+        # Enter opens the selection from the list; on a focused button
+        # it activates THAT button (ttk buttons only react to Space by
+        # default, so Tab-to-Quit + Enter would otherwise open a board).
+        self.root.bind("<Return>", self._on_return)
+        self.root.bind("<Escape>", lambda e: self._quit())
+
+        buttons = ttk.Frame(outer)
+        buttons.pack(fill="x", pady=(10, 0))
+        self.quit_btn = ttk.Button(buttons, text="Quit", command=self._quit)
+        self.quit_btn.pack(side="right")
+        self.browse_btn = ttk.Button(buttons, text="Browse…",
+                                     command=self._browse)
+        self.browse_btn.pack(side="right", padx=(0, 6))
+        self.open_btn = ttk.Button(buttons, text="Open selected",
+                                   command=self._open_selected)
+        self.open_btn.pack(side="right", padx=(0, 6))
+        self.tree.focus_set()
+
+    def _on_return(self, event=None) -> None:
+        focus = self.root.focus_get()
+        if isinstance(focus, ttk.Button):
+            focus.invoke()
+            return
+        self._open_selected()
+
+    def _on_tree_double_click(self, event) -> None:
+        if self.tree.identify_region(event.x, event.y) not in ("tree", "cell"):
+            return
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        self.tree.selection_set(iid)
+        self._open_selected()
+
+    def _center(self) -> None:
+        self.root.update_idletasks()
+        w = max(self.root.winfo_reqwidth(), 560)
+        h = max(self.root.winfo_reqheight(), 320)
+        x = max(0, (self.root.winfo_screenwidth() - w) // 2)
+        y = max(0, (self.root.winfo_screenheight() - h) // 3)
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
+
+    def selected_row(self) -> Optional[Tuple[Path, bool]]:
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        try:
+            return self._rows[int(sel[0])]
+        except (ValueError, IndexError):
+            return None
+
+    def _open_selected(self) -> None:
+        row = self.selected_row()
+        if row is None:
+            return
+        path, exists = row
+        if not exists:
+            messagebox.showwarning(
+                "File not found",
+                f"{path}\n\nThis recent entry no longer exists. Pick "
+                "another board or use Browse….", parent=self.root)
+            return
+        self._finish(path)
+
+    def _browse(self) -> None:
+        picked = filedialog.askopenfilename(
+            parent=self.root, title="Open boardview",
+            filetypes=_BOARD_FILETYPES, initialdir=_last_dir() or ".",
+        )
+        if picked:
+            self._finish(Path(picked))
+
+    def _finish(self, path: Path) -> None:
+        self.result = path
+        self.root.quit()
+
+    def _quit(self) -> None:
+        self.result = None
+        self.root.quit()
+
+    def run(self) -> Optional[Path]:
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+        # Keyboard focus on the list once the window is mapped, so
+        # Up/Down walk the entries and Enter opens straight away.
+        self.root.after_idle(self.tree.focus_set)
+        self.root.mainloop()
+        return self.result
+
+
+def _pick_startup_board() -> Optional[Path]:
+    """Startup board picker for `main()` when no path was given.
+
+    Shows the recent-boards launcher when the config has a recent list;
+    otherwise falls straight through to the file dialog as before. The
+    temporary `tk.Tk` root is destroyed before returning so `ViewerApp`
+    (itself a `tk.Tk`) starts on a clean interpreter."""
+    recent = _get_recent()
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        if not recent:
+            picked = filedialog.askopenfilename(
+                title="Open boardview",
+                filetypes=_BOARD_FILETYPES,
+                initialdir=_last_dir() or ".",
+            )
+            return Path(picked) if picked else None
+        return StartupLauncher(root, recent).run()
+    finally:
+        root.destroy()
+
+
 def main() -> None:
     # Print a one-time perf warning if any of the native DLLs are missing.
     # Cheap (a couple of LoadLibrary attempts) and visible *before* the
@@ -992,22 +1329,11 @@ def main() -> None:
     else:
         if args.smoke_test:
             ap.error("--smoke-test requires a board path")
-        root = tk.Tk()
-        root.withdraw()
-        try:
-            picked = filedialog.askopenfilename(
-                title="Open boardview",
-                filetypes=[
-                    ("Boardview", "*.cad *.brd *.brd2 *.bv *.tvw *.fz *.pcb"),
-                    ("All files", "*.*"),
-                ],
-                initialdir=_last_dir() or ".",
-            )
-        finally:
-            root.destroy()
-        if not picked:
+        # Recent-boards launcher (falls back to the file dialog when
+        # the recent list is empty). Destroys its own tk root first.
+        board_path = _pick_startup_board()
+        if board_path is None:
             return
-        board_path = Path(picked)
         _remember_dir(board_path)
 
     try:
