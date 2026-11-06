@@ -71,6 +71,8 @@ fingerprint() {
         find "$WHEEL_DIR" -type f -exec stat -f "%N %z %m" {} + | sort
         stat -f "%z %m" "$PROJECT_DIR/vendor/Python.xcframework/VERSIONS" 2>/dev/null || true
         echo "$EFFECTIVE_PLATFORM_NAME ${ARCHS:-} ${EXPANDED_CODE_SIGN_IDENTITY:--}"
+        # Changes to this script change the staged payload too.
+        /sbin/md5 -q "$0"
     } | /sbin/md5 -q
 }
 FP="$(fingerprint)"
@@ -90,7 +92,11 @@ echo "Staged ${#PYTHON_MODULES[@]} Python modules into app/"
 
 rm -rf "$PKG_DIR"
 mkdir -p "$PKG_DIR"
-rsync -a "$WHEEL_DIR/" "$PKG_DIR/"
+# The numpy wheel ships static libraries (numpy/core/lib/libnpymath.a,
+# numpy/random/lib/libnpyrandom.a) used only to compile C extensions against
+# numpy. App Store Connect rejects standalone libraries outside a framework
+# (ITMS-90171), and nothing loads them at runtime, so leave them out.
+rsync -a --exclude='*.a' "$WHEEL_DIR/" "$PKG_DIR/"
 echo "Staged app_packages from $(basename "$WHEEL_DIR")"
 
 # Embed: stdlib into python/lib, every .so (stdlib + numpy) converted into a
