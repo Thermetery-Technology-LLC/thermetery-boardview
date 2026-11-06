@@ -84,6 +84,13 @@ The installed app stores settings and remembered keys under
 keeps them under its adjacent `data` directory; remove `data\private` before
 sharing a used portable folder because remembered keys are plaintext files.
 
+### iPhone and iPad
+
+iOS releases (tags `v<version>-ios`) ship an unsigned IPA that you install
+with a sideloading tool such as Sideloadly, AltStore or SideStore, signed
+with your own Apple ID. Step-by-step instructions are in
+[ios/README.md](ios/README.md#install-by-sideloading).
+
 ## Running
 
 ```
