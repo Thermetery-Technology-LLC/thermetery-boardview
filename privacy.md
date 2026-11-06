@@ -1,6 +1,6 @@
 # Thermetery Boardview — Privacy Policy
 
-*Effective: [DATE]*
+*Effective: November 5, 2026*
 
 Thermetery Technology LLC ("we") publishes Thermetery Boardview ("the app")
 for iPhone and iPad. This policy explains how the app handles information.
@@ -53,4 +53,4 @@ effective date before the change ships.
 
 ## Contact
 
-[CONTACT EMAIL]
+jiacheng@thermetery.com
