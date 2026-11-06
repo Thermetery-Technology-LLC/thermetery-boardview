@@ -61,6 +61,9 @@ for kernel in tvw_native xzz_native rc6_native; do
     strip -x "$dest"
     cp "$PLIST_TEMPLATE" "$fw_dir/Info.plist"
     plutil -replace CFBundleExecutable -string "$kernel" "$fw_dir/Info.plist"
+    # The BeeWare template says MinimumOSVersion 13.0, but these slices are
+    # built for $MIN_IOS; App Store processing rejects the mismatch (ITMS-90208).
+    plutil -replace MinimumOSVersion -string "$MIN_IOS" "$fw_dir/Info.plist"
     plutil -replace CFBundleIdentifier \
         -string "$(echo "$PRODUCT_BUNDLE_IDENTIFIER.$kernel" | tr '_' '-')" \
         "$fw_dir/Info.plist"
