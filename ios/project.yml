@@ -36,6 +36,8 @@ targets:
       path: Boardview/Info.plist
       properties:
         CFBundleDisplayName: Boardview
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen:
           UIColorName: LaunchBackground
         UISupportedInterfaceOrientations:
