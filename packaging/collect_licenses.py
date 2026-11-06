@@ -17,6 +17,7 @@ import re
 import shutil
 import sys
 import tempfile
+import zipfile
 from typing import Iterable, Optional, Sequence, Tuple
 
 
@@ -29,8 +30,8 @@ REQUIRED_PROJECT_LICENSES: Tuple[str, ...] = (
     "LICENSES/OpenBoardView-MIT.txt",
     "LICENSES/dhuertas-DES-MIT.txt",
     "LICENSES/PyOpenGL-BSD.txt",
-    "LICENSES/Tcl-8.6.txt",
-    "LICENSES/Tk-8.6.txt",
+    "LICENSES/Tcl-9.0.txt",
+    "LICENSES/Tk-9.0.txt",
 )
 
 # These distributions are part of the frozen runtime (or contribute its
@@ -238,9 +239,18 @@ def _collect_distribution(
     return copied
 
 
-def _runtime_license_candidates() -> Iterable[Tuple[str, Path, Path]]:
+def _runtime_license_candidates() -> Iterable[Tuple[str, Path, Optional[str], Path]]:
+    """Yield (label, source path, archive member or None, target) tuples.
+
+    Tcl/Tk 8.6 installs keep ``license.terms`` on disk under
+    ``<prefix>/tcl/tcl8.6`` and ``tk8.6``.  Tcl/Tk 9 Windows builds
+    (python.org 3.14.7 and later) embed the whole script library, license
+    included, as a zip archive appended to ``tcl90.dll`` and
+    ``tcl9tk90.dll``; those are read through ``zipfile``.  Both layouts are
+    offered so the first one that exists wins.
+    """
     base = Path(sys.base_prefix).resolve()
-    yield "CPython", base / "LICENSE.txt", Path("runtime") / "CPython-LICENSE.txt"
+    yield "CPython", base / "LICENSE.txt", None, Path("runtime") / "CPython-LICENSE.txt"
 
     try:
         import tkinter
@@ -250,22 +260,46 @@ def _runtime_license_candidates() -> Iterable[Tuple[str, Path, Path]]:
         version = "8.6"
 
     tcl_root = base / "tcl"
+    dll_root = base / "DLLs"
+    tcl_dll = sorted(
+        path for path in dll_root.glob("tcl9*.dll")
+        if not path.name.lower().startswith("tcl9tk")
+    )
+    tk_dll = sorted(dll_root.glob("tcl9tk9*.dll"))
     yield (
         "Tcl",
         tcl_root / f"tcl{version}" / "license.terms",
+        None,
         Path("runtime") / "Tcl-license.terms",
     )
+    for dll in tcl_dll:
+        yield "Tcl", dll, "tcl_library/license.terms", Path("runtime") / "Tcl-license.terms"
     yield (
         "Tk",
         tcl_root / f"tk{version}" / "license.terms",
+        None,
         Path("runtime") / "Tk-license.terms",
     )
+    for dll in tk_dll:
+        yield "Tk", dll, "tk_library/license.terms", Path("runtime") / "Tk-license.terms"
+
+
+def _read_archive_member(archive: Path, member: str) -> Optional[bytes]:
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            return bundle.read(member)
+    except (OSError, KeyError, zipfile.BadZipFile):
+        return None
 
 
 def _collect_runtime_licenses(staging: Path, epoch: int) -> int:
     copied = 0
     base = Path(sys.base_prefix).resolve()
-    for label, source, target_relative in _runtime_license_candidates():
+    done = set()
+    missing = {}
+    for label, source, member, target_relative in _runtime_license_candidates():
+        if label in done:
+            continue
         if source.is_symlink():
             if label == "CPython":
                 raise CollectionError(f"required CPython license is a symlink: {source}")
@@ -274,7 +308,7 @@ def _collect_runtime_licenses(staging: Path, epoch: int) -> int:
         if not source.is_file():
             if label == "CPython":
                 raise CollectionError(f"required CPython license was not found at {source}")
-            _warn(f"optional {label} runtime license was not found at {source}")
+            missing.setdefault(label, []).append(str(source))
             continue
         resolved = source.resolve()
         if not _is_relative_to(resolved, base):
@@ -282,8 +316,25 @@ def _collect_runtime_licenses(staging: Path, epoch: int) -> int:
                 raise CollectionError("required CPython license is outside the Python install")
             _warn(f"skipping optional {label} license outside the Python install")
             continue
-        _copy_file(resolved, staging / target_relative, epoch)
+        if member is None:
+            _copy_file(resolved, staging / target_relative, epoch)
+        else:
+            data = _read_archive_member(resolved, member)
+            if data is None:
+                missing.setdefault(label, []).append(f"{source}:{member}")
+                continue
+            target = staging / target_relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            os.utime(target, (epoch, epoch))
+        done.add(label)
         copied += 1
+    for label, tried in missing.items():
+        if label not in done:
+            _warn(
+                f"optional {label} runtime license was not found; tried: "
+                + ", ".join(tried)
+            )
     return copied
 
 

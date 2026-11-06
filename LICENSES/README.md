@@ -15,8 +15,8 @@ the upstream license in full as required.
 | File | Upstream | Used in |
 | ---- | -------- | ------- |
 | `PyOpenGL-BSD.txt` | https://github.com/mcfletch/pyopengl/tree/3.1.10 | PyOpenGL 3.1.10 runtime bundled in Windows releases |
-| `Tcl-8.6.txt` | https://github.com/tcltk/tcl/tree/core-8-6-15 | Tcl 8.6 runtime bundled in Windows releases |
-| `Tk-8.6.txt` | https://github.com/tcltk/tk/tree/core-8-6-15 | Tk 8.6 runtime bundled in Windows releases |
+| `Tcl-9.0.txt` | https://github.com/tcltk/tcl/tree/core-9-0-4 | Tcl 9.0 runtime bundled in Windows releases (terms unchanged since Tcl 8.6, so this file also covers builds made on a Tcl 8.6 Python) |
+| `Tk-9.0.txt` | https://github.com/tcltk/tk/tree/core-9-0-4 | Tk 9.0 runtime bundled in Windows releases (terms unchanged since Tk 8.6) |
 
 The project itself is **LGPL-3.0-or-later** (`LICENSE` at the repository root).
 
