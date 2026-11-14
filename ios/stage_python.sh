@@ -104,4 +104,16 @@ echo "Staged app_packages from $(basename "$WHEEL_DIR")"
 source "$PROJECT_DIR/vendor/Python.xcframework/build/utils.sh"
 install_python vendor/Python.xcframework app_packages
 
+# Drop CPython's OpenSSL-backed modules. _ssl and _hashlib statically link
+# OpenSSL, which App Store Connect flags as a commonly used third-party SDK
+# without a privacy manifest (ITMS-91061). The app makes no network
+# connections, and hashlib falls back to the built-in _sha2/_md5/_sha1/
+# _blake2 modules without _hashlib. Leaving OpenSSL out also keeps the
+# bundle's cryptography to the DES/RC6 decryption described in the export
+# filings.
+for mod in _ssl _hashlib; do
+    rm -rf "$CODESIGNING_FOLDER_PATH/Frameworks/$mod.framework"
+    rm -f "$CODESIGNING_FOLDER_PATH"/python/lib/python3.*/lib-dynload/$mod.*.fwork
+done
+
 echo "$FP" > "$STAMP"
