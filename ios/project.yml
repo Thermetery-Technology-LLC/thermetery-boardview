@@ -38,6 +38,10 @@ targets:
         CFBundleDisplayName: Boardview
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # Export compliance: the app uses standard encryption (DES/RC6 decryption of
+        # user-keyed board files); documentation approved in App Store Connect.
+        ITSAppUsesNonExemptEncryption: true
+        ITSEncryptionExportComplianceCode: 1ee61701-d50a-43c2-932a-fa5eff94a9cb
         UILaunchScreen:
           UIColorName: LaunchBackground
         UISupportedInterfaceOrientations:
