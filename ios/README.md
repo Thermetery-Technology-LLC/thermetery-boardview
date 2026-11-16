@@ -11,6 +11,87 @@ dylibs in a build phase. The binding contract is
 `../docs/android_contract.md` — the iOS shell implements the §4/§6 shell
 role; §1–§3 and §5 are shared verbatim.
 
+## Install by sideloading
+
+Until Boardview is on the App Store, you can install it on an iPhone or
+iPad from the IPA attached to each iOS release on the
+[Releases page](https://github.com/Thermetery-Technology-LLC/thermetery-boardview/releases)
+(tags `v<version>-ios`, file `ThermeteryBoardviewer-<version>-ios-unsigned.ipa`).
+
+You need:
+
+- an iPhone or iPad on iOS / iPadOS 15.0 or later (your sideloading tool
+  may need a newer iOS; check its requirements);
+- a Mac or Windows PC for the sideloading tool's first setup. On Windows,
+  install iTunes and iCloud from Apple's website, not the Microsoft Store
+  versions;
+- an Apple ID. A free one works; the app needs no special entitlements.
+
+The IPA is **unsigned on purpose**. It contains no provisioning profile and
+no code signatures; your sideloading tool signs it with your own Apple ID
+as it installs. It cannot be installed as-is by opening it on the device,
+with Apple Configurator, or with Xcode.
+
+1. **Download and check.** Download the `.ipa` and `SHA256SUMS-ios.txt`
+   from the release into the same folder, then check the file:
+
+   ```bash
+   shasum -a 256 -c SHA256SUMS-ios.txt                     # macOS / Linux
+   ```
+   ```powershell
+   Get-FileHash .\ThermeteryBoardviewer-<version>-ios-unsigned.ipa   # Windows
+   ```
+
+   On Windows, compare the printed hash with the one in
+   `SHA256SUMS-ios.txt`; PowerShell prints it in upper case.
+
+2. **Install it with one of these tools**, following that tool's own
+   setup guide:
+
+   - [Sideloadly](https://sideloadly.io) (macOS / Windows): connect the
+     device by USB, drop the IPA into Sideloadly, enter your Apple ID and
+     click Start.
+   - [AltStore](https://altstore.io) (AltServer on macOS / Windows, AltStore
+     on the device): copy the IPA to the device (AirDrop or Files), then in
+     AltStore open **My Apps**, tap **+** and pick the IPA.
+   - [SideStore](https://sidestore.io): its setup is more involved (a
+     pairing file and a VPN app); follow its guide, then add the IPA from
+     **My Apps → +** the same way as AltStore.
+
+3. **Turn on Developer Mode** (iOS / iPadOS 16 and later): Settings →
+   Privacy & Security → Developer Mode → On. After the restart, tap
+   **Turn On** and enter your passcode. The switch only appears once an app
+   signed with a development certificate (such as a sideloaded one) has
+   been installed; AltStore and SideStore users usually do this while
+   setting up the tool itself.
+
+4. **Trust your Apple ID** if iOS says *Untrusted Developer* the first
+   time you open the app: Settings → General → VPN & Device Management →
+   your Apple ID → Trust. If you already trusted it for AltStore or
+   SideStore, you will not see this.
+
+5. **Open a board** with the in-app **Open** / **Folder** buttons, or from
+   the Files app with Share → Boardview. Encrypted ASUS `.fz` and XZZPCB
+   `.pcb` boards need a key, which is not shipped: the app asks for it on
+   open, and **Keys** manages remembered keys (see the top-level README).
+
+Limits that come with signing under a **free** Apple ID (they are Apple's,
+not Boardview's):
+
+- The signature lasts **7 days**. After that the app will not launch until
+  it is refreshed. AltStore and SideStore refresh it in the background
+  (AltStore needs AltServer running on your computer on the same Wi-Fi);
+  Sideloadly can auto-refresh while your computer is on, or you can
+  install it again. A paid Apple Developer account's signature lasts a
+  year.
+- Only **3** sideloaded apps can be active at once, and AltStore / SideStore
+  count themselves as one.
+- To update, install the newer IPA with the same tool and Apple ID.
+
+Sideloading tools may change the app's bundle identifier (AltStore and
+SideStore add a suffix), so a sideloaded copy and an App Store copy are
+separate apps with separate data and keys.
+
 ## Layout / ownership
 
 | Path | What | Owner |
