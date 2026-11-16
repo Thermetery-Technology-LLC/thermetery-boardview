@@ -134,6 +134,12 @@ Android.openFolderPicker() // SAF tree picker for folder-shaped boards
 Android.loadTraces()       // async; shell later calls bv.onTraces(...)
 Android.openKeyManager()   // launches KeyManagerActivity (per-format key screen)
 Android.log(msg)           // logcat passthrough (tag "BoardviewJS")
+Android.appInfo()          // SYNC, returns a JSON string for the About page:
+                           // {"version","build","platform","os"} (iOS bakes
+                           // it in at document start)
+Android.openUrl(url)       // open in the system browser; the shells only
+                           // accept https URLs under the project repo
+Android.openLicenses()     // native third-party licenses screen
 ```
 
 **Renderer dev-harness rule:** when `window.Android` is undefined (desktop

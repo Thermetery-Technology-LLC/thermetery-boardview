@@ -1731,6 +1731,105 @@
     }
   }
 
+  /* ------------------------------------------------------------------ *
+   *  About: version, copyright, LGPL, repo + issue links
+   * ------------------------------------------------------------------ */
+  // Keep in sync with src/app_info.py (tests/test_app_info.py checks).
+  var APP_NAME = "Thermetery Boardview";
+  var APP_COPYRIGHT = "Copyright \u00A9 2026 Thermetery Technology LLC";
+  var REPO_URL = "https://github.com/Thermetery-Technology-LLC/thermetery-boardview";
+  var ISSUES_NEW_URL = REPO_URL + "/issues/new";
+  var LICENSE_URL = REPO_URL + "/blob/main/LICENSE";
+
+  var elAbout = document.getElementById("bv-about");
+  var btnAbout = document.getElementById("bv-btn-about");
+
+  // The shell supplies the build it is running as a JSON string:
+  // {version, build, platform, os}. The dev harness (no shell) and older
+  // shells without appInfo() just show "dev build".
+  function appInfo() {
+    var info = null;
+    try {
+      if (hasAndroid && typeof window.Android.appInfo === "function") {
+        info = JSON.parse(window.Android.appInfo());
+      }
+    } catch (e) { alog("appInfo: " + e); }
+    return info || {};
+  }
+
+  function versionLine(info) {
+    if (!info.version) return "dev build";
+    var s = "Version " + info.version;
+    if (info.build) s += " (build " + info.build + ")";
+    if (info.platform) s += "  \u00B7  " + info.platform;
+    return s;
+  }
+
+  // Links leave the app: through the shell (system browser) when there is
+  // one, else a new tab. The shells only open URLs under REPO_URL.
+  function openExternal(url) {
+    if (hasAndroid && typeof window.Android.openUrl === "function") {
+      window.Android.openUrl(url);
+    } else {
+      window.open(url, "_blank", "noopener");
+    }
+  }
+
+  // GitHub's new-issue page, pre-filled with what a bug report needs and
+  // the reporter cannot easily look up themselves.
+  function issueUrl() {
+    var info = appInfo();
+    var lines = [
+      "**App:** " + APP_NAME + " " + versionLine(info).replace(/^Version /, ""),
+      "**Device / OS:** " + (info.os || navigator.userAgent),
+    ];
+    if (board && board.meta && board.meta.format) {
+      lines.push("**Board format:** " + board.meta.format);
+    }
+    lines.push("", "**What happened:**", "", "",
+               "**What you expected:**", "", "",
+               "**Steps / screenshots:**", "");
+    return ISSUES_NEW_URL + "?body=" + encodeURIComponent(lines.join("\n"));
+  }
+
+  function openAbout() {
+    if (!elAbout) return;
+    document.getElementById("bv-about-version").textContent = versionLine(appInfo());
+    document.getElementById("bv-about-copyright").textContent =
+      APP_COPYRIGHT + ". Licensed under the GNU LGPL v3.0 or later.";
+    elAbout.classList.remove("hidden");
+  }
+
+  function closeAbout() {
+    if (elAbout) elAbout.classList.add("hidden");
+  }
+
+  if (btnAbout && elAbout) {
+    btnAbout.addEventListener("click", openAbout);
+    document.getElementById("bv-about-close").addEventListener("click", closeAbout);
+    // Tap on the dimmed backdrop (outside the card) closes.
+    elAbout.addEventListener("click", function (e) {
+      if (e.target === elAbout) closeAbout();
+    });
+    document.getElementById("bv-about-report").addEventListener("click", function () {
+      openExternal(issueUrl());
+    });
+    document.getElementById("bv-about-repo").addEventListener("click", function () {
+      openExternal(REPO_URL);
+    });
+    document.getElementById("bv-about-license").addEventListener("click", function () {
+      openExternal(LICENSE_URL);
+    });
+    var btnThird = document.getElementById("bv-about-thirdparty");
+    if (hasAndroid && typeof window.Android.openLicenses === "function") {
+      btnThird.classList.remove("hidden");
+      btnThird.addEventListener("click", function () { window.Android.openLicenses(); });
+    }
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") closeAbout();
+    });
+  }
+
   btnLayer.addEventListener("click", function () {
     if (!board) return;
     // Cycling into/out of BOTTOM (index 1) flips the effective mirror, so

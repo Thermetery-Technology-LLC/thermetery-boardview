@@ -2,8 +2,11 @@ package com.thermetery.boardview
 
 import android.annotation.SuppressLint
 import android.app.AlertDialog
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
+import android.os.Build
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
@@ -196,6 +199,59 @@ class MainActivity : ComponentActivity() {
     /** Called (on the UI thread) from BoardviewBridge.openKeyManager. */
     fun launchKeyManager() {
         startActivity(Intent(this, KeyManagerActivity::class.java))
+    }
+
+    /** Called (on the UI thread) from BoardviewBridge.openLicenses. */
+    fun launchLicenses() {
+        startActivity(Intent(this, LicensesActivity::class.java))
+    }
+
+    /**
+     * Called (on the UI thread) from BoardviewBridge.openUrl — the About
+     * page's repo / license / report-an-issue links. Only https URLs under
+     * the project's GitHub repo are opened (the renderer is local, but the
+     * bridge is still an entry point into an external browser intent).
+     */
+    fun openExternalUrl(url: String) {
+        if (!AppInfo.isAllowedExternalUrl(url)) {
+            Log.w(TAG, "openUrl refused: $url")
+            return
+        }
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (e: ActivityNotFoundException) {
+            postError("No browser available to open ${AppInfo.REPO_URL}")
+        }
+    }
+
+    /** `{version, build, platform, os}` for the About page. */
+    fun appInfoJson(): String {
+        val pkg = try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
+            } else {
+                @Suppress("DEPRECATION")
+                packageManager.getPackageInfo(packageName, 0)
+            }
+        } catch (e: PackageManager.NameNotFoundException) {
+            null
+        }
+        val build = if (pkg == null) "" else if (Build.VERSION.SDK_INT >= 28) {
+            pkg.longVersionCode.toString()
+        } else {
+            @Suppress("DEPRECATION")
+            pkg.versionCode.toString()
+        }
+        return JSONObject()
+            .put("version", pkg?.versionName ?: "")
+            .put("build", build)
+            .put("platform", "Android")
+            .put(
+                "os",
+                "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), " +
+                    "${Build.MANUFACTURER} ${Build.MODEL}",
+            )
+            .toString()
     }
 
     /** Called (on a WebView thread) from BoardviewBridge.loadTraces. */

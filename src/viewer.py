@@ -27,9 +27,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import tkinter as tk
+import webbrowser
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from . import key_store
+from . import app_info, key_store
 from .parsers.boardview import BoardModel, parse as parse_board, FZKeyError
 from .app_common import (ConfigStore, check_native_dlls,
                          surface_model_warnings)
@@ -338,6 +339,9 @@ class ViewerApp(tk.Tk):
         menubar.add_cascade(label="Settings", menu=settings_menu)
 
         help_menu = tk.Menu(menubar, tearoff=False)
+        help_menu.add_command(label="Report an issue…",
+                              command=self._report_issue)
+        help_menu.add_separator()
         help_menu.add_command(label="About", command=self._show_about)
         menubar.add_cascade(label="Help", menu=help_menu)
 
@@ -913,17 +917,23 @@ class ViewerApp(tk.Tk):
                     bits.append("measure: click first point")
         self.status.config(text="   ".join(bits))
 
+    def _current_board_format(self) -> Optional[str]:
+        path = getattr(self, "board_path", None)
+        if not path:
+            return None
+        return Path(path).suffix.lstrip(".").lower() or None
+
+    def _report_issue(self) -> None:
+        webbrowser.open(app_info.issue_url(self._current_board_format()))
+
     def _show_about(self) -> None:
-        messagebox.showinfo(
-            "About Boardviewer",
-            "Boardviewer\n"
-            "Pan/zoom boardview viewer with component & net browsing.\n\n"
-            "Supported formats:\n"
-            "  • GENCAD 1.4   (.cad)\n"
-            "  • OpenBoardView ASCII   (.brd / .brd2 / .bv)\n"
-            "  • Teboview   (.tvw)\n"
-            "  • XZZPCB V1.0   (.pcb, MSI / repair shops)\n",
-        )
+        existing = getattr(self, "_about", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_set()
+            return
+        self._about = AboutDialog(self,
+                                  board_format=self._current_board_format())
 
     def _open_key_manager(self) -> None:
         # Reuse a single instance so repeated menu clicks just refocus it.
@@ -949,6 +959,75 @@ _STATUS_COLORS = {
     "bad": "#b42318",
     "neutral": "#555555",
 }
+
+
+class AboutDialog(tk.Toplevel):
+    """Help → About: version, copyright, LGPL notice, and links to the
+    repository and GitHub's new-issue page (pre-filled with version / OS /
+    board format). Desktop counterpart of the mobile renderer's About
+    overlay; strings come from :mod:`app_info`."""
+
+    LINK_COLOR = "#1a6fd1"
+
+    def __init__(self, master: tk.Misc, board_format: Optional[str] = None
+                 ) -> None:
+        super().__init__(master)
+        self.title(f"About {app_info.APP_NAME}")
+        self.transient(master)
+        self.resizable(False, False)
+        self._board_format = board_format
+        self._build()
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.update_idletasks()
+        self.grab_set()
+
+    def _link(self, parent: tk.Misc, text: str,
+              url_fn: Callable[[], str]) -> ttk.Label:
+        lbl = ttk.Label(parent, text=text, foreground=self.LINK_COLOR,
+                        cursor="hand2", font=("TkDefaultFont", 10, "underline"))
+        lbl.bind("<Button-1>", lambda _e: webbrowser.open(url_fn()))
+        return lbl
+
+    def _build(self) -> None:
+        outer = ttk.Frame(self, padding=16)
+        outer.pack(fill="both", expand=True)
+
+        ttk.Label(outer, text=app_info.APP_NAME,
+                  font=("TkDefaultFont", 14, "bold")).pack(anchor="w")
+        version = ttk.Entry(outer, width=48)
+        version.insert(0, f"Version {app_info.build_description()}")
+        version.configure(state="readonly")   # selectable for bug reports
+        version.pack(anchor="w", pady=(2, 8))
+
+        ttk.Label(
+            outer, wraplength=460, justify="left",
+            text=("PCB boardview viewer: parts, pins, nets and traces for "
+                  "TVW, FZ, XZZPCB, GENCAD, BRD and eM-Test ASC boards."),
+        ).pack(anchor="w")
+
+        links = ttk.Frame(outer)
+        links.pack(anchor="w", pady=(10, 10))
+        self._link(links, "Report an issue on GitHub",
+                   lambda: app_info.issue_url(self._board_format)
+                   ).pack(anchor="w")
+        self._link(links, "Source code on GitHub",
+                   lambda: app_info.REPO_URL).pack(anchor="w", pady=(4, 0))
+
+        ttk.Separator(outer).pack(fill="x", pady=(0, 8))
+        ttk.Label(outer, text=f"{app_info.COPYRIGHT}. Licensed under the "
+                              f"{app_info.LICENSE_NAME}.",
+                  wraplength=460, justify="left").pack(anchor="w")
+        ttk.Label(outer, text=app_info.LICENSE_NOTICE, wraplength=460,
+                  justify="left", foreground="#777777").pack(
+                      anchor="w", pady=(6, 4))
+        self._link(outer, "GNU LGPL v3.0 text",
+                   lambda: app_info.LICENSE_URL).pack(anchor="w")
+
+        buttons = ttk.Frame(outer)
+        buttons.pack(fill="x", pady=(12, 0))
+        ttk.Button(buttons, text="Close", command=self.destroy).pack(
+            side="right")
 
 
 class KeyManagerDialog(tk.Toplevel):

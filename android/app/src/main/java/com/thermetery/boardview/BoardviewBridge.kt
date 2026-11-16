@@ -33,6 +33,20 @@ class BoardviewBridge(private val activity: MainActivity) {
     }
 
     @JavascriptInterface
+    fun openLicenses() {
+        activity.runOnUiThread { activity.launchLicenses() }
+    }
+
+    @JavascriptInterface
+    fun openUrl(url: String) {
+        activity.runOnUiThread { activity.openExternalUrl(url) }
+    }
+
+    /** Synchronous: the About page reads the build it is running as. */
+    @JavascriptInterface
+    fun appInfo(): String = activity.appInfoJson()
+
+    @JavascriptInterface
     fun log(msg: String) {
         Log.i("BoardviewJS", msg)
     }

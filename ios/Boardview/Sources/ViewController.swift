@@ -36,8 +36,9 @@ final class ViewController: UIViewController {
 
     // The window.Android shim: injected at document start (before viewer.js
     // runs — it captures `hasAndroid` once at module load) so the renderer's
-    // dev-harness never activates. All five methods are fire-and-forget on
-    // Android too; none of their return values is consumed. Console output
+    // dev-harness never activates. Every method but appInfo() is
+    // fire-and-forget on Android too; appInfo() is synchronous there, so
+    // here it returns a value baked in at document start. Console output
     // is piped to the shell, replacing WebChromeClient.onConsoleMessage.
     private static let bridgeShimJS = """
     (function () {
@@ -47,6 +48,9 @@ final class ViewController: UIViewController {
         openFolderPicker: function () { post({cmd: 'openFolderPicker'}); },
         loadTraces: function () { post({cmd: 'loadTraces'}); },
         openKeyManager: function () { post({cmd: 'openKeyManager'}); },
+        openLicenses: function () { post({cmd: 'openLicenses'}); },
+        openUrl: function (url) { post({cmd: 'openUrl', url: String(url)}); },
+        appInfo: function () { return window.__bvAppInfo || '{}'; },
         log: function (msg) { post({cmd: 'log', msg: String(msg)}); }
       };
       function pipe(level, args) {
@@ -64,6 +68,45 @@ final class ViewController: UIViewController {
     })();
     """
 
+    /// `{version, build, platform, os}` for the About page, exposed to the
+    /// shim's synchronous `Android.appInfo()` as a document-start global
+    /// (WKScriptMessageHandler round trips are async).
+    private static var appInfoJS: String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let device = UIDevice.current
+        let payload: [String: String] = [
+            "version": info["CFBundleShortVersionString"] as? String ?? "",
+            "build": info["CFBundleVersion"] as? String ?? "",
+            "platform": "iOS",
+            "os": "\(device.systemName) \(device.systemVersion), \(device.model)",
+        ]
+        let json = (try? JSONSerialization.data(withJSONObject: payload))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        // Embed as a JS string literal holding the JSON text.
+        let literal = (try? JSONSerialization.data(
+            withJSONObject: [json], options: [.fragmentsAllowed]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[\"{}\"]"
+        return "window.__bvAppInfo = \(literal)[0];\n"
+    }
+
+    /// Only https URLs at or under the project repo leave the app (the
+    /// About page's repo / license / report-an-issue links). Mirrors
+    /// android AppInfo.isAllowedExternalUrl.
+    static let repoURL = "https://github.com/Thermetery-Technology-LLC/thermetery-boardview"
+
+    static func isAllowedExternalURL(_ url: String) -> Bool {
+        guard url == repoURL || url.hasPrefix(repoURL + "/") || url.hasPrefix(repoURL + "?") else {
+            return false
+        }
+        let path = url.split(separator: "?", maxSplits: 1).first.map(String.init) ?? url
+        let bare = (path.split(separator: "#", maxSplits: 1).first.map(String.init) ?? path)
+            .lowercased()
+        // Percent-encoded dots / backslashes count too: browsers resolve
+        // "%2e%2e" as a ".." segment.
+        return !bare.contains("/.") && !bare.contains("\\") && !bare.contains("@") &&
+            !bare.contains("%2e") && !bare.contains("%5c")
+    }
+
     // MARK: - Lifecycle
 
     override func viewDidLoad() {
@@ -73,7 +116,8 @@ final class ViewController: UIViewController {
         let config = WKWebViewConfiguration()
         config.userContentController.add(WeakScriptMessageHandler(self), name: "bridge")
         config.userContentController.addUserScript(WKUserScript(
-            source: Self.bridgeShimJS, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            source: Self.appInfoJS + Self.bridgeShimJS,
+            injectionTime: .atDocumentStart, forMainFrameOnly: true))
 
         webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
@@ -475,6 +519,15 @@ extension ViewController: WKScriptMessageHandler {
             requestTraces()
         case "openKeyManager":
             launchKeyManager()
+        case "openLicenses":
+            present(LicensesViewController(), animated: true)
+        case "openUrl":
+            let raw = body["url"] as? String ?? ""
+            if Self.isAllowedExternalURL(raw), let url = URL(string: raw) {
+                UIApplication.shared.open(url)
+            } else {
+                Self.jsLog.error("openUrl refused: \(raw, privacy: .public)")
+            }
         case "log":
             Self.jsLog.info("\(body["msg"] as? String ?? "", privacy: .public)")
         case "console":
