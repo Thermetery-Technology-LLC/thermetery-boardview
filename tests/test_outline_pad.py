@@ -704,3 +704,25 @@ class StartupLauncherTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PadRadiusTest(unittest.TestCase):
+    """Desktop pads scale with zoom like the Android renderer's."""
+
+    def test_scales_with_pitch_and_zoom(self):
+        r = CanvasCommon._pad_radius_px(300.0, 0.5, 1.0)
+        self.assertAlmostEqual(r, 300.0 * 0.5 * CanvasCommon.PAD_PITCH_FRAC)
+        self.assertAlmostEqual(CanvasCommon._pad_radius_px(300.0, 1.0, 1.0),
+                               2 * r)
+
+    def test_floor_when_zoomed_out_or_no_pitch(self):
+        self.assertEqual(CanvasCommon._pad_radius_px(300.0, 0.001, 2.5), 2.5)
+        self.assertEqual(CanvasCommon._pad_radius_px(None, 1.0, 2.5), 2.5)
+        self.assertEqual(CanvasCommon._pad_radius_px(0.0, 1.0, 2.5), 2.5)
+
+    def test_neighbouring_pads_never_touch(self):
+        pitch, ppu = 40.0, 3.0
+        for frac in (CanvasCommon.PAD_PITCH_FRAC,
+                     CanvasCommon.PAD_PITCH_FRAC_ALL):
+            r = CanvasCommon._pad_radius_px(pitch, ppu, 0.5, frac)
+            self.assertLess(2 * r, pitch * ppu)

@@ -826,6 +826,23 @@ class CanvasCommon:
         return max_pins is None or n <= max_pins
 
 
+    # Pad radius as a fraction of the part's pin pitch, matching the
+    # Android renderer (viewer.js: pitch * 0.27 for a part's pins, 0.3 for
+    # the all-pins overlay). Both stay under 0.5 so neighbours never touch.
+    PAD_PITCH_FRAC = 0.27
+    PAD_PITCH_FRAC_ALL = 0.30
+
+    @staticmethod
+    def _pad_radius_px(pitch, ppu: float, floor: float,
+                       frac: float = PAD_PITCH_FRAC) -> float:
+        """World-scaled pad radius in px (pitch * frac * px-per-unit), so
+        pads grow with zoom like real copper; never below `floor`, the
+        legacy fixed-pixel radius, which is also the no-pitch fallback."""
+        if not pitch or pitch <= 0 or ppu <= 0:
+            return floor
+        return max(floor, pitch * ppu * frac)
+
+
     def _px_per_unit(self, w: int, h: int) -> float:
         """Current screen pixels per world unit (zoom-dependent). Goes
         through `_project` so rotation/mirror and both tiers' projection
@@ -2070,7 +2087,8 @@ class BoardCanvasCPU(CanvasCommon, tk.Canvas):
         rx0, ry0, rx1, ry1 = self._viewport_world(w, h)
         ppu = self._px_per_unit(w, h)
         max_pins = self._overlay_budget(entry, w, h, ppu)[2]
-        pin_r = max(0.8, 1.2 * (self.zoom ** 0.35)) * 0.85
+        pin_floor = max(0.8, 1.2 * (self.zoom ** 0.35)) * 0.85
+        pad_r = self._pad_radius_px
         color = self.ALL_PINS_COLOR
         project = self._project
         create_oval = self.create_oval
@@ -2081,6 +2099,7 @@ class BoardCanvasCPU(CanvasCommon, tk.Canvas):
             if c.refdes == selected or \
                     not self._comp_pins_shown(pitch, n, ppu, max_pins):
                 continue
+            pin_r = pad_r(pitch, ppu, pin_floor, self.PAD_PITCH_FRAC_ALL)
             theta = math.radians(c.rotation)
             ct, st = math.cos(theta), math.sin(theta)
             for _pin_name, dx, dy in shape.pins:
@@ -2098,8 +2117,10 @@ class BoardCanvasCPU(CanvasCommon, tk.Canvas):
             return
         theta = math.radians(c.rotation)
         ct, st = math.cos(theta), math.sin(theta)
-        pin_r = max(0.8, 1.2 * (self.zoom ** 0.35))
-        sel_pin_r = max(3.5, pin_r * 2.6)
+        floor = max(0.8, 1.2 * (self.zoom ** 0.35))
+        pin_r = self._pad_radius_px(shape_pin_pitch(shape),
+                                    self._px_per_unit(w, h), floor)
+        sel_pin_r = max(3.5, floor * 2.6, pin_r * 1.35)
         for pin_name, dx, dy in shape.pins:
             wx = c.x + dx * ct - dy * st
             wy = c.y + dx * st + dy * ct
@@ -3288,19 +3309,21 @@ if _GL_AVAILABLE:
                 return
             ppu = self._px_per_unit(w, h)
             max_pins = self._overlay_budget(entry, w, h, ppu)[2]
-            pin_r = max(0.8, 1.2 * (zoom ** 0.35)) * 0.85
+            pin_floor = max(0.8, 1.2 * (zoom ** 0.35)) * 0.85
             paint = _skia.Paint()
             paint.setAntiAlias(True)
             paint.setColor(self._hex_to_skia(self.ALL_PINS_COLOR))
             paint.setStyle(_skia.Paint.Style.kStroke_Style)
             paint.setStrokeCap(_skia.Paint.Cap.kRound_Cap)
-            paint.setStrokeWidth(2.0 * pin_r / effective_scale)
             canvas.save()
             canvas.concat(self._world_to_screen_matrix())
             for group in entry["groups"].values():
                 if not self._comp_pins_shown(group["pitch"], group["n"],
                                              ppu, max_pins):
                     continue
+                pin_r = self._pad_radius_px(group["pitch"], ppu, pin_floor,
+                                            self.PAD_PITCH_FRAC_ALL)
+                paint.setStrokeWidth(2.0 * pin_r / effective_scale)
                 pts = group.get("gl_points")
                 if pts is None:
                     pts = [_skia.Point(x, -y)
@@ -3319,8 +3342,10 @@ if _GL_AVAILABLE:
                 return
             theta = math.radians(c.rotation)
             ct, st = math.cos(theta), math.sin(theta)
-            pin_r = max(0.8, 1.2 * (self.zoom ** 0.35))
-            sel_pin_r = max(3.5, pin_r * 2.6)
+            floor = max(0.8, 1.2 * (self.zoom ** 0.35))
+            pin_r = self._pad_radius_px(shape_pin_pitch(shape),
+                                        self._px_per_unit(w, h), floor)
+            sel_pin_r = max(3.5, floor * 2.6, pin_r * 1.35)
 
             pin_paint = _skia.Paint()
             pin_paint.setAntiAlias(True)

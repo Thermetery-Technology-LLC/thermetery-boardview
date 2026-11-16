@@ -80,8 +80,15 @@
   var btnMirror = document.getElementById("bv-btn-mirror");
   var elToolbar = document.getElementById("bv-toolbar");
   var elPanelNet = document.getElementById("bv-panel-net");
+  var elPanelInfo = document.getElementById("bv-panel-info");
+  var elPanelDesc = document.getElementById("bv-panel-desc");
+  var elPanelHead = document.getElementById("bv-panel-head");
+  var btnPanelMin = document.getElementById("bv-panel-min");
+  var elReopen    = document.getElementById("bv-reopen");
+  var elReopenName = document.getElementById("bv-reopen-name");
   var elTabPins = document.getElementById("bv-tab-pins");
   var elTabNet  = document.getElementById("bv-tab-net");
+  var elTabInfo = document.getElementById("bv-tab-info");
   var elErrlog  = document.getElementById("bv-errlog");
   var elDev     = document.getElementById("bv-dev");
   var elDevFile = document.getElementById("bv-dev-file");
@@ -490,6 +497,7 @@
       layerIdx = -1;
       userMirror = false;
       view.rot = 0;
+      lastPanel = null;
       closePanel();
       updateChip();
       // dev-harness JSON may carry segments inline (board+traces in one file)
@@ -501,6 +509,7 @@
       }
       rebuildLayerColors();
       rebuildSearchIndex();
+      hideSuggest();
       updateButtons();
       fitView();
       var nc = board.comps.length, nn = board.nets.length;
@@ -1140,6 +1149,8 @@
     elPanelMeta.textContent = c.pinCount + " pin" + (c.pinCount === 1 ? "" : "s") +
       "  ·  " + lay +
       (c.rotation ? "  ·  " + c.rotation + "°" : "");
+    setPartInfo(c.props);
+    lastPanel = { kind: "comp", ci: ci, pin: sel.pin };
     var pinNet = (sel.pin >= 0) ? board.pinNet[c.pinStart + sel.pin] : -1;
     var wantNet = (tab === "net" && pinNet >= 0);
     if (wantNet) {
@@ -1155,7 +1166,7 @@
         try { selRow.scrollIntoView({ block: "nearest" }); } catch (e) { /* ok */ }
       }
     }
-    elPanel.classList.add("open");
+    openPanel(!center);
     if (center) {
       var bb = c.bbox;
       var maxDim = Math.max(bb[2] - bb[0], bb[3] - bb[1], board.pitch * 2);
@@ -1209,8 +1220,43 @@
     activeTab = name;
     if (elTabPins) elTabPins.classList.toggle("on", name === "pins");
     if (elTabNet)  elTabNet.classList.toggle("on", name === "net");
+    if (elTabInfo) elTabInfo.classList.toggle("on", name === "info");
     elPanelPins.classList.toggle("hidden", name !== "pins");
     if (elPanelNet) elPanelNet.classList.toggle("hidden", name !== "net");
+    if (elPanelInfo) elPanelInfo.classList.toggle("hidden", name !== "info");
+  }
+
+  /* ---- Info tab + header description: optional BOM metadata ---- */
+  var INFO_LABELS = { description: "Description", part_number: "Part number" };
+
+  function setPartInfo(props) {
+    var keys = props ? Object.keys(props) : [];
+    if (elPanelDesc) {
+      var d = props && (props.description || props.part_number);
+      elPanelDesc.textContent = d ? String(d) : "";
+      elPanelDesc.classList.toggle("hidden", !d);
+    }
+    if (!elPanelInfo || !elTabInfo) return;
+    elPanelInfo.textContent = "";
+    elTabInfo.classList.toggle("hidden", keys.length === 0);
+    if (!keys.length) {
+      if (activeTab === "info") showTab("pins");
+      return;
+    }
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < keys.length; i++) {
+      var row = document.createElement("div");
+      row.className = "bv-inforow";
+      var kk = document.createElement("span");
+      kk.className = "bv-infokey";
+      kk.textContent = INFO_LABELS[keys[i]] || keys[i].replace(/_/g, " ");
+      var vv = document.createElement("span");
+      vv.className = "bv-infoval";
+      vv.textContent = String(props[keys[i]]);
+      row.appendChild(kk); row.appendChild(vv);
+      frag.appendChild(row);
+    }
+    elPanelInfo.appendChild(frag);
   }
 
   function buildNetTab(net) {
@@ -1292,6 +1338,7 @@
 
   if (elTabPins) elTabPins.addEventListener("click", function () { showTab("pins"); });
   if (elTabNet)  elTabNet.addEventListener("click", function () { showTab("net"); });
+  if (elTabInfo) elTabInfo.addEventListener("click", function () { showTab("info"); });
 
   if (elPanelNet) elPanelNet.addEventListener("click", function (e) {
     var row = e.target.closest ? e.target.closest(".bv-netrow") : null;
@@ -1317,20 +1364,86 @@
     scheduleRender();
   });
 
-  document.getElementById("bv-panel-close").addEventListener("click", function () {
+  document.getElementById("bv-panel-close").addEventListener("click", function (e) {
+    e.stopPropagation();
     sel = null;
     closePanel();
     scheduleRender();
   });
 
+  // Last thing the panel showed, so a closed panel can be brought back
+  // from the reopen pill: {kind:"comp", ci, pin} | {kind:"net", net}.
+  var lastPanel = null;
+
+  // keepMin: a minimized panel stays minimized when the selection changes
+  // underneath it (tapping parts while looking around); only the header
+  // strip updates. Opening from closed always shows the full panel.
+  function openPanel(keepMin) {
+    if (!(keepMin && elPanel.classList.contains("open"))) setPanelMin(false);
+    elPanel.classList.add("open");
+    if (elReopen) elReopen.classList.add("hidden");
+  }
+
   function closePanel() {
     elPanel.classList.remove("open");
+    elPanel.classList.remove("min");
+    updateReopen();
   }
+
+  function setPanelMin(on) {
+    elPanel.classList.toggle("min", on);
+    if (btnPanelMin) {
+      btnPanelMin.title = on ? "Expand" : "Minimize";
+      btnPanelMin.setAttribute("aria-label", on ? "Expand panel" : "Minimize panel");
+    }
+  }
+
+  function updateReopen() {
+    if (!elReopen) return;
+    var name = null;
+    if (board && lastPanel) {
+      if (lastPanel.kind === "comp" && board.comps[lastPanel.ci]) {
+        name = board.comps[lastPanel.ci].ref;
+      } else if (lastPanel.kind === "net") {
+        name = netName(lastPanel.net);
+      }
+    }
+    if (name == null || elPanel.classList.contains("open")) {
+      elReopen.classList.add("hidden");
+      return;
+    }
+    elReopenName.textContent = String(name);
+    elReopen.classList.remove("hidden");
+  }
+
+  function reopenPanel() {
+    if (!board || !lastPanel) return;
+    if (lastPanel.kind === "comp" && board.comps[lastPanel.ci]) {
+      selectComp(lastPanel.ci, lastPanel.pin, false, "pins");
+    } else if (lastPanel.kind === "net" && netName(lastPanel.net) != null) {
+      openNetPanel(lastPanel.net);
+    }
+  }
+
+  // Minimize: the chevron, or a tap anywhere on the header strip, folds
+  // the panel down to that strip (board stays visible) and back.
+  if (btnPanelMin) btnPanelMin.addEventListener("click", function (e) {
+    e.stopPropagation();
+    setPanelMin(!elPanel.classList.contains("min"));
+  });
+  if (elPanelHead) elPanelHead.addEventListener("click", function () {
+    if (elPanel.classList.contains("open")) {
+      setPanelMin(!elPanel.classList.contains("min"));
+    }
+  });
+  if (elReopen) elReopen.addEventListener("click", reopenPanel);
 
   // Open the panel as a pure net view (no component selected) — used by net
   // search so the Net tab shows the net's members straight away.
   function openNetPanel(net) {
     sel = null;
+    lastPanel = { kind: "net", net: net };
+    setPartInfo(null);
     elPanelRef.textContent = netName(net) || ("net " + net);
     elPanelMeta.textContent = "net";
     elPanelPins.textContent = "";
@@ -1340,7 +1453,7 @@
     elPanelPins.appendChild(hint);
     buildNetTab(net);
     showTab("net");
-    elPanel.classList.add("open");
+    openPanel();
     scheduleRender();
   }
 
@@ -1542,7 +1655,9 @@
     if (hit) {
       // pin tap -> Net tab (highlighting its net); body tap -> Pins tab
       selectComp(hit.ci, hit.pin, false, hit.pin >= 0 ? "net" : "pins");
-    } else {
+    } else if (!elPanel.classList.contains("min")) {
+      // A minimized panel survives taps on empty board (the user folded
+      // it to look around); an expanded one closes as before.
       sel = null;
       closePanel();
       scheduleRender();
@@ -1676,7 +1791,7 @@
   }
 
   /* ------------------------------------------------------------------ *
-   *  Search (datalist prefix autocomplete over refdes + nets)
+   *  Search (prefix autocomplete over refdes + nets, in-page list)
    * ------------------------------------------------------------------ */
   var searchIndex = [];   // {key, label, type:'comp'|'net', idx}
 
@@ -1695,22 +1810,80 @@
     }
   }
 
-  elSearch.addEventListener("input", function () {
-    var v = elSearch.value.trim().toLowerCase();
+  // The suggestions are plain DOM rows rather than a <datalist>: the
+  // WebView's native datalist popup lost its background intermittently
+  // (rows rendered over a see-through popup while the canvas repainted).
+  var SUGGEST_MAX = 50;
+
+  function hideSuggest() {
+    elSuggest.classList.add("hidden");
     elSuggest.textContent = "";
-    if (!v) return;
+    elSearch.setAttribute("aria-expanded", "false");
+  }
+
+  function renderSuggest() {
+    var raw = elSearch.value.trim();
+    var v = raw.toLowerCase();
+    elSuggest.textContent = "";
+    if (!v || !board) { hideSuggest(); return; }
     var frag = document.createDocumentFragment();
-    var count = 0;
-    for (var i = 0; i < searchIndex.length && count < 50; i++) {
-      if (searchIndex[i].key.lastIndexOf(v, 0) === 0) {    // startsWith
-        var opt = document.createElement("option");
-        opt.value = searchIndex[i].label;
-        opt.label = searchIndex[i].type;
-        frag.appendChild(opt);
-        count++;
-      }
+    var count = 0, more = 0;
+    for (var i = 0; i < searchIndex.length; i++) {
+      var ent = searchIndex[i];
+      if (ent.key.lastIndexOf(v, 0) !== 0) continue;     // startsWith
+      if (count >= SUGGEST_MAX) { more++; continue; }
+      var row = document.createElement("div");
+      row.className = "bv-sugrow";
+      row.setAttribute("role", "option");
+      row.dataset.i = i;
+      var nm = document.createElement("span");
+      nm.className = "bv-sugname";
+      var b = document.createElement("b");
+      b.textContent = ent.label.slice(0, v.length);
+      nm.appendChild(b);
+      nm.appendChild(document.createTextNode(ent.label.slice(v.length)));
+      var ty = document.createElement("span");
+      ty.className = "bv-sugtype";
+      ty.textContent = ent.type === "comp" ? "part" : "net";
+      row.appendChild(nm); row.appendChild(ty);
+      frag.appendChild(row);
+      count++;
+    }
+    if (!count) { hideSuggest(); return; }
+    if (more) {
+      var m = document.createElement("div");
+      m.className = "bv-sugmore";
+      m.textContent = "+ " + more + " more — keep typing";
+      frag.appendChild(m);
     }
     elSuggest.appendChild(frag);
+    elSuggest.scrollTop = 0;
+    elSuggest.classList.remove("hidden");
+    elSearch.setAttribute("aria-expanded", "true");
+  }
+
+  elSearch.addEventListener("input", renderSuggest);
+  elSearch.addEventListener("focus", function () {
+    if (elSearch.value.trim()) renderSuggest();
+  });
+  elSearch.addEventListener("blur", function () {
+    // Row taps keep focus (pointerdown is cancelled below), so a blur is
+    // the user leaving the box — close the list.
+    hideSuggest();
+  });
+
+  // Keep the input focused while a row is pressed, so the list does not
+  // close (blur) before the tap lands; the scroll gesture still works
+  // because only the default focus change is suppressed.
+  elSuggest.addEventListener("mousedown", function (e) { e.preventDefault(); });
+  elSuggest.addEventListener("click", function (e) {
+    var row = e.target.closest ? e.target.closest(".bv-sugrow") : null;
+    if (!row || row.dataset.i == null) return;
+    var ent = searchIndex[row.dataset.i | 0];
+    if (!ent) return;
+    elSearch.value = ent.label;
+    hideSuggest();
+    activateEntry(ent);
   });
 
   function searchActivate(value) {
@@ -1727,6 +1900,11 @@
     }
     var hitEnt = exact || prefix;
     if (!hitEnt) { showToast("No match: " + value); return; }
+    activateEntry(hitEnt);
+  }
+
+  function activateEntry(hitEnt) {
+    hideSuggest();
     if (hitEnt.type === "comp") {
       selectComp(hitEnt.idx, -1, true, "pins");
     } else {
@@ -1737,13 +1915,12 @@
     elSearch.blur();
   }
 
-  elSearch.addEventListener("change", function () {
-    if (elSearch.value) searchActivate(elSearch.value);
-  });
   elSearch.addEventListener("keydown", function (e) {
     if (e.key === "Enter") {
       e.preventDefault();
       searchActivate(elSearch.value);
+    } else if (e.key === "Escape") {
+      hideSuggest();
     }
   });
 

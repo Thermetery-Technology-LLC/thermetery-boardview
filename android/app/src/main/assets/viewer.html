@@ -22,10 +22,15 @@
     <button id="bv-btn-rotr"   type="button" title="Rotate right 90°" aria-label="Rotate right">&#8635;</button>
     <button id="bv-btn-keys"   type="button" title="Decryption keys">Keys</button>
   </div>
-  <input  id="bv-search" type="search" list="bv-suggest"
+  <input  id="bv-search" type="search"
           placeholder="Search ref / net…" autocomplete="off" autocapitalize="off"
-          autocorrect="off" spellcheck="false">
-  <datalist id="bv-suggest"></datalist>
+          autocorrect="off" spellcheck="false" enterkeyhint="search"
+          role="combobox" aria-autocomplete="list" aria-controls="bv-suggest"
+          aria-expanded="false">
+  <!-- In-page suggestion list. Not a <datalist>: Android WebView draws the
+       native datalist popup with a background that periodically goes
+       transparent while the board canvas repaints underneath it. -->
+  <div id="bv-suggest" class="hidden" role="listbox"></div>
 </div>
 
 <div id="bv-netchip" class="hidden">
@@ -36,19 +41,33 @@
 
 <div id="bv-panel">
   <div id="bv-panel-head">
-    <span id="bv-panel-ref"></span>
-    <span id="bv-panel-meta"></span>
+    <div id="bv-panel-title">
+      <div id="bv-panel-line">
+        <span id="bv-panel-ref"></span>
+        <span id="bv-panel-meta"></span>
+      </div>
+      <div id="bv-panel-desc" class="hidden"></div>
+    </div>
+    <button id="bv-panel-min" type="button" title="Minimize" aria-label="Minimize panel">&#9662;</button>
     <button id="bv-panel-close" type="button" title="Close">&#10005;</button>
   </div>
   <div id="bv-panel-tabs">
     <button id="bv-tab-pins" class="bv-tab on" type="button">Pins</button>
     <button id="bv-tab-net"  class="bv-tab"    type="button">Net</button>
+    <button id="bv-tab-info" class="bv-tab hidden" type="button">Info</button>
   </div>
   <div id="bv-panel-body">
     <div id="bv-panel-pins"></div>
     <div id="bv-panel-net" class="hidden"></div>
+    <div id="bv-panel-info" class="hidden"></div>
   </div>
 </div>
+
+<!-- Shown after the panel is closed: brings the last selection back. -->
+<button id="bv-reopen" class="hidden" type="button" title="Reopen details">
+  <span id="bv-reopen-arrow">&#9652;</span>
+  <span id="bv-reopen-name"></span>
+</button>
 
 <div id="bv-status"></div>
 <div id="bv-toast" class="hidden"></div>

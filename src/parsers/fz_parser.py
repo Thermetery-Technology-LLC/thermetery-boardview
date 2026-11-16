@@ -168,8 +168,12 @@ def parse(path: Path, key=None) -> BoardModel:
     if len(buf) < 12:
         raise ValueError(f"{p.name}: file too short for FZ format")
 
-    text = _decode_fz(buf, source_name=p.name, source_path=p, key=key)
-    return _parse_extracta(text)
+    text, descr = _decode_fz_parts(buf, source_name=p.name, source_path=p,
+                                   key=key)
+    model = _parse_extracta(text)
+    if descr:
+        _apply_descriptions(model, descr)
+    return model
 
 
 # --------------------------------------------------------------------------
@@ -178,8 +182,18 @@ def parse(path: Path, key=None) -> BoardModel:
 
 def _decode_fz(buf: bytearray, *, source_name: str,
                source_path: Optional[Path] = None, key=None) -> str:
-    """Decode an FZ file's body into the Extracta text content.
-    Description block is parsed but discarded (it's BoM-style metadata)."""
+    """Decode an FZ file's body into the Extracta text content only."""
+    return _decode_fz_parts(buf, source_name=source_name,
+                            source_path=source_path, key=key)[0]
+
+
+def _decode_fz_parts(buf: bytearray, *, source_name: str,
+                     source_path: Optional[Path] = None,
+                     key=None) -> Tuple[str, str]:
+    """Decode an FZ file into (Extracta content text, description text).
+
+    The description block is the BOM (part number, description, qty,
+    refdes list, alternates); it is '' when absent or undecodable."""
     # Skip the 4-byte uncompressed-size header. Detect whether the body
     # starts with zlib magic — if so it's already plaintext (ASRock).
     is_zlib = (len(buf) >= 6
@@ -207,9 +221,9 @@ def _decode_fz(buf: bytearray, *, source_name: str,
         # Skip the 6+ second pure-Python RC6 if we've decoded this
         # file before with this key. Cache lives next to the source
         # file as `.fz.cache` so it travels with the boardview.
-        cached_text = _cache_load(source_path, buf, key)
-        if cached_text is not None:
-            return cached_text
+        cached = _cache_load(source_path, buf, key)
+        if cached is not None:
+            return cached
 
         # RC6 decode runs over the WHOLE buffer (matches OpenBoardView's
         # `FZFile::decode(file_buf, buffer_size)`). The 4-byte size
@@ -225,21 +239,64 @@ def _decode_fz(buf: bytearray, *, source_name: str,
     d = zlib.decompressobj()
     content = d.decompress(bytes(buf[4:]))
     text = content.decode("latin-1", errors="replace")
+    descr = _decode_description(bytes(buf), d.unused_data)
 
     # Save the decrypted text alongside the file so subsequent loads
     # can skip RC6 entirely. (No-op for ASRock files — those are fast
     # already so we don't bother caching them.)
     if not is_zlib:
-        _cache_save(source_path, key=key, text=text)
+        _cache_save(source_path, key=key, text=text, descr=descr)
 
-    return text
+    return text, descr
+
+
+def _decode_description(buf: bytes, tail: bytes) -> str:
+    """Inflate the trailing description (BOM) block.
+
+    Layout after the content stream: an 8-byte mini-header (two uint32 LE;
+    the second is the inflated size) + a zlib stream, with the block's
+    total size repeated as a uint32 LE in the last 4 bytes of the file.
+    Locate it from that trailer first; fall back to the bytes the content
+    inflater left unused. Returns '' on any failure — the description is
+    optional metadata and must never fail the parse."""
+    candidates = []
+    if len(buf) >= 16:
+        (size,) = struct.unpack("<I", buf[-4:])
+        if 8 < size <= len(buf) - 8:
+            candidates.append(buf[-4 - size:-4])
+    if tail:
+        candidates.append(tail)
+    for blk in candidates:
+        for off in (8, 0):
+            if len(blk) > off + 2 and blk[off] == 0x78:
+                try:
+                    raw = zlib.decompressobj().decompress(blk[off:])
+                except zlib.error:
+                    continue
+                if raw:
+                    return _decode_text(raw)
+    return ""
+
+
+def _decode_text(raw: bytes) -> str:
+    """BOM text from Taiwanese ODMs is Big5 (cp950) — e.g. a diameter
+    sign in a screw description. Decode per line so one stray byte does
+    not demote the whole block; lines that are not valid cp950 fall back
+    to latin-1."""
+    out = []
+    for line in raw.split(b"\n"):
+        try:
+            out.append(line.decode("cp950"))
+        except (UnicodeDecodeError, LookupError):
+            out.append(line.decode("latin-1"))
+    return "\n".join(out)
 
 
 # --------------------------------------------------------------------------
 # Decrypted-text cache
 # --------------------------------------------------------------------------
 
-_CACHE_MAGIC = b"FZC2"  # bump if format changes
+_CACHE_MAGIC = b"FZC3"  # bump if format changes (FZC3: + description)
 
 
 def _cache_path_for(source_path: Optional[Path]) -> Optional[Path]:
@@ -260,8 +317,8 @@ def _key_fingerprint(key: List[int]) -> bytes:
 
 
 def _cache_load(source_path: Optional[Path], buf: bytes,
-                key: List[int]) -> Optional[str]:
-    """Return cached plaintext if the cache file matches the source +
+                key: List[int]) -> Optional[Tuple[str, str]]:
+    """Return cached (plaintext, description) if the cache file matches the source +
     key fingerprint exactly; else None.
 
     Validates source size, source mtime_ns, and the key fingerprint.
@@ -279,6 +336,12 @@ def _cache_load(source_path: Optional[Path], buf: bytes,
             keyhash = f.read(16)
             text_len = struct.unpack("<Q", f.read(8))[0]
             text_bytes = f.read(text_len)
+            if len(text_bytes) != text_len:
+                return None
+            descr_len = struct.unpack("<Q", f.read(8))[0]
+            descr_bytes = f.read(descr_len)
+            if len(descr_bytes) != descr_len:
+                return None
         st = os.stat(source_path)
         if st.st_size != size:
             return None
@@ -286,13 +349,14 @@ def _cache_load(source_path: Optional[Path], buf: bytes,
             return None
         if keyhash != _key_fingerprint(key):
             return None
-        return text_bytes.decode("latin-1", errors="replace")
+        return (text_bytes.decode("latin-1", errors="replace"),
+                descr_bytes.decode("utf-8", errors="replace"))
     except (OSError, struct.error, UnicodeDecodeError):
         return None
 
 
 def _cache_save(source_path: Optional[Path], *,
-                key: List[int], text: str) -> None:
+                key: List[int], text: str, descr: str = "") -> None:
     cache_path = _cache_path_for(source_path)
     if cache_path is None:
         return
@@ -305,6 +369,9 @@ def _cache_save(source_path: Optional[Path], *,
             f.write(_key_fingerprint(key))
             f.write(struct.pack("<Q", len(body)))
             f.write(body)
+            dbody = descr.encode("utf-8")
+            f.write(struct.pack("<Q", len(dbody)))
+            f.write(dbody)
     except OSError:
         # Read-only directory or similar; not critical — just skip cache.
         pass
@@ -512,6 +579,9 @@ def _parse_extracta(text: str) -> BoardModel:
     model = BoardModel()
     current_columns: Optional[List[str]] = None
     pin_records: List[Dict[str, str]] = []
+    # Per-refdes body geometry from the symbol graphics section, keyed by
+    # outline source class (see _OUTLINE_CLASSES) -> world points.
+    graphics: Dict[str, Dict[str, List[Tuple[float, float]]]] = {}
 
     def _split(line: str) -> List[str]:
         # Drop leading 'A!' / 'S!' and the trailing empty cell from the
@@ -522,6 +592,7 @@ def _parse_extracta(text: str) -> BoardModel:
             parts = parts[:-1]
         return parts[1:]
 
+    scale = _unit_scale(text)
     for line in text.splitlines():
         if not line:
             continue
@@ -586,8 +657,23 @@ def _parse_extracta(text: str) -> BoardModel:
             pin_records.append(rec)
             continue
 
-        # Other sections (vias, graphics, board geometry, TESTVIA, etc.)
-        # are parsed-and-skipped intentionally.
+        # Symbol graphics: per-component silkscreen / place-bound /
+        # assembly geometry. Used for the part outline — the pin bbox is
+        # degenerate for 2-pin parts (a choke reads 300 x 0 mil).
+        if ("GRAPHIC_DATA_NAME" in current_columns
+                and "REFDES" in current_columns
+                and "SUBCLASS" in current_columns):
+            refdes = rec.get("REFDES", "").strip()
+            cls = _outline_class(rec.get("SUBCLASS", ""))
+            if refdes and cls:
+                pts = _graphic_points(rec)
+                if pts:
+                    graphics.setdefault(refdes, {}).setdefault(
+                        cls, []).extend(pts)
+            continue
+
+        # Other sections (vias, board geometry, TESTVIA, etc.) are
+        # parsed-and-skipped intentionally.
 
     # Build signals + populate the per-instance shapes.
     pins_by_refdes: Dict[str, List[Dict[str, str]]] = {}
@@ -728,9 +814,253 @@ def _parse_extracta(text: str) -> BoardModel:
                 local_pins.append(
                     (canonical_pin_name[(refdes, i)], dx, dy),
                 )
-        model.shapes[comp.shape] = Shape(name=comp.shape, pins=local_pins)
+        shape = Shape(name=comp.shape, pins=local_pins)
+        shape.bbox_override = _graphic_local_bbox(
+            comp, graphics.get(refdes), local_pins, slack=1000.0 / scale)
+        if shape.bbox_override is not None:
+            comp.props["outline"] = _OUTLINE_LABEL[
+                _best_outline_class(graphics.get(refdes))]
+        model.shapes[comp.shape] = shape
 
+    if scale != 1.0:
+        _scale_model(model, scale)
     return model
+
+
+# File units -> mils. Every other parser hands the canvases mils (or TVW
+# centi-mils), and the outline padding / unit-span heuristics in
+# src/units.py are tuned for that; ASUS exports are in millimetres, which
+# made every passive a >10 mm box once the mil-sized padding was applied.
+_UNIT_TO_MILS = {
+    "mils": 1.0, "mil": 1.0,
+    "millimeters": 1000.0 / 25.4, "millimeter": 1000.0 / 25.4,
+    "mm": 1000.0 / 25.4,
+    "inches": 1000.0, "inch": 1000.0, "in": 1000.0,
+    "microns": 1.0 / 25.4, "micron": 1.0 / 25.4, "um": 1.0 / 25.4,
+}
+
+
+def _unit_scale(text: str) -> float:
+    """Multiplier from the file's coordinate unit to mils, from the unit
+    declaration near the top: ASRock writes a schema-style ``A!UNIT!mils!``
+    row, ASUS a bare ``UNIT:millimeters`` line. No/unknown declaration ->
+    1.0 (mils, the historical assumption)."""
+    for line in text.splitlines()[:8]:
+        line = line.strip()
+        unit = None
+        if line.upper().startswith("A!UNIT!"):
+            unit = line.split("!")[2] if line.count("!") >= 2 else ""
+        elif line.upper().startswith("UNIT:"):
+            unit = line.split(":", 1)[1]
+        if unit is not None:
+            return _UNIT_TO_MILS.get(unit.strip().lower(), 1.0)
+    return 1.0
+
+
+def _scale_model(model: BoardModel, scale: float) -> None:
+    """Uniformly rescale placements and per-instance shapes (rotation is
+    unaffected by a uniform scale)."""
+    for comp in model.components.values():
+        comp.x *= scale
+        comp.y *= scale
+    for shape in model.shapes.values():
+        shape.pins = [(n, dx * scale, dy * scale) for n, dx, dy in shape.pins]
+        bb = shape.bbox_override
+        if bb is not None:
+            shape.bbox_override = tuple(v * scale for v in bb)
+
+
+# Outline source preference: the placement boundary is Allegro's body
+# extent; silkscreen is a close second but can carry pin-1 marks; the
+# assembly outline is rarely populated in these exports.
+_OUTLINE_CLASSES = ("PLACE_BOUND", "SILKSCREEN", "ASSEMBLY")
+_OUTLINE_LABEL = {
+    "PLACE_BOUND": "place bound",
+    "SILKSCREEN": "silkscreen",
+    "ASSEMBLY": "assembly",
+}
+
+
+def _outline_class(subclass: str) -> Optional[str]:
+    sub = (subclass or "").strip().upper()
+    for cls in _OUTLINE_CLASSES:
+        if sub.startswith(cls):
+            return cls
+    return None
+
+
+def _best_outline_class(by_cls) -> Optional[str]:
+    if not by_cls:
+        return None
+    for cls in _OUTLINE_CLASSES:
+        if by_cls.get(cls):
+            return cls
+    return None
+
+
+def _graphic_points(rec: Dict[str, str]) -> List[Tuple[float, float]]:
+    """World points that bound one graphic record. LINE / RECTANGLE carry
+    two corners in GRAPHIC_DATA_1..4; an ARC carries start (1,2), end
+    (3,4), centre (5,6) and radius (7) — a full circle (start == end)
+    adds its four extreme points, other arcs contribute their ends."""
+    kind = rec.get("GRAPHIC_DATA_NAME", "").strip().upper()
+    try:
+        x1 = _parse_float(rec.get("GRAPHIC_DATA_1", ""))
+        y1 = _parse_float(rec.get("GRAPHIC_DATA_2", ""))
+        x2 = _parse_float(rec.get("GRAPHIC_DATA_3", ""))
+        y2 = _parse_float(rec.get("GRAPHIC_DATA_4", ""))
+    except ValueError:
+        return []
+    if kind in ("LINE", "RECTANGLE"):
+        return [(x1, y1), (x2, y2), (x1, y2), (x2, y1)]
+    if kind == "ARC":
+        pts = [(x1, y1), (x2, y2)]
+        try:
+            cx = _parse_float(rec.get("GRAPHIC_DATA_5", ""))
+            cy = _parse_float(rec.get("GRAPHIC_DATA_6", ""))
+            r = _parse_float(rec.get("GRAPHIC_DATA_7", ""))
+        except ValueError:
+            return pts
+        if r > 0 and abs(x1 - x2) < 1e-6 and abs(y1 - y2) < 1e-6:
+            pts += [(cx - r, cy), (cx + r, cy), (cx, cy - r), (cx, cy + r)]
+        return pts
+    return []
+
+
+def _graphic_local_bbox(comp: Component, by_cls,
+                        local_pins: List[Tuple[str, float, float]],
+                        slack: float = 1000.0):
+    """The component's body rectangle in its local (unrotated) frame, from
+    the best available graphics class, grown to cover every pin. None
+    when the file has no usable graphics for the part (the renderer then
+    keeps deriving the outline from the pins).
+
+    A body that is wildly larger than the pin cloud is distrusted — a
+    graphic record mis-attributed to the wrong refdes must not paint a
+    board-sized box (cap: 4x the pin extent plus `slack`, 1000 mil in
+    file units)."""
+    cls = _best_outline_class(by_cls)
+    if cls is None:
+        return None
+    theta = math.radians(-comp.rotation)
+    ct, st = math.cos(theta), math.sin(theta)
+    xs: List[float] = []
+    ys: List[float] = []
+    for px, py in by_cls[cls]:
+        rx = px - comp.x
+        ry = py - comp.y
+        xs.append(rx * ct - ry * st)
+        ys.append(rx * st + ry * ct)
+    x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+    if local_pins:
+        pxs = [p[1] for p in local_pins]
+        pys = [p[2] for p in local_pins]
+        px0, py0, px1, py1 = min(pxs), min(pys), max(pxs), max(pys)
+        limit = 4.0 * max(px1 - px0, py1 - py0) + slack
+        if max(x1 - x0, y1 - y0) > limit:
+            return None
+        x0, y0 = min(x0, px0), min(y0, py0)
+        x1, y1 = max(x1, px1), max(y1, py1)
+    if x1 - x0 <= 0 or y1 - y0 <= 0:
+        return None
+    return (x0, y0, x1, y1)
+
+
+# --------------------------------------------------------------------------
+# Description (BOM) block → Component.props
+# --------------------------------------------------------------------------
+
+def _parse_descriptions(descr: str) -> Dict[str, Dict[str, str]]:
+    """Map refdes -> BOM fields from the description block.
+
+    Tab-separated. Line 1 is a board title; a header row names the
+    columns (PARTNUMBER, DESCRIPTION, QTY, LOCATION, PARTNUMBER2). A row
+    whose first cell starts with lowercase 's' is an approved alternate
+    ("second source") for the main row above it. LOCATION is a space-
+    separated refdes list."""
+    out: Dict[str, Dict[str, str]] = {}
+    cols: Optional[List[str]] = None
+    current: Optional[Dict[str, str]] = None
+    for line in descr.splitlines():
+        cells = [c.strip() for c in line.split("\t")]
+        if not any(cells):
+            continue
+        if cols is None:
+            if "PARTNUMBER" in cells and "LOCATION" in cells:
+                cols = cells
+            continue
+        is_alt = cells[0][:1] == "s" and cells[0][1:2].isalnum()
+        if is_alt:
+            alt = cells[0][1:]
+            if len(cells) > 1 and cells[1]:
+                alt += "  " + cells[1]
+            row = dict(zip(cols, cells))
+            refs = row.get("LOCATION", "").split() if len(cells) >= 4 else []
+            if refs:
+                # ASUS: a full row carrying its own refdes list, possibly
+                # ahead of the main part it substitutes for.
+                for ref in refs:
+                    ent = out.get(ref)
+                    if ent is None:
+                        ent = out[ref] = _bom_entry("", "", "")
+                    if alt not in ent["alternates"]:
+                        ent["alternates"].append(alt)
+            elif current is not None:
+                # ASRock: a 2-cell row under the main part it substitutes.
+                current["alternates"].append(alt)
+            continue
+        if len(cells) < 4:
+            current = None
+            continue
+        row = dict(zip(cols, cells))
+        current = _bom_entry(row.get("PARTNUMBER", ""),
+                             row.get("DESCRIPTION", ""), row.get("QTY", ""))
+        for ref in row.get("LOCATION", "").split():
+            ent = out.get(ref)
+            if ent is None:
+                out[ref] = current
+            elif not ent["part_number"]:
+                # Only alternates were seen so far: the main part fills in.
+                ent.update(part_number=current["part_number"],
+                           description=current["description"],
+                           qty=current["qty"])
+    return out
+
+
+def _bom_entry(part_number: str, description: str, qty: str):
+    return {"part_number": part_number, "description": description,
+            "qty": qty, "alternates": []}
+
+
+def _apply_descriptions(model: BoardModel, descr: str) -> None:
+    """Attach BOM part number / description / alternates to components.
+    BOM locations sometimes carry an instance suffix ("U3_1" for U3);
+    an exact refdes match wins, else the suffix is stripped."""
+    try:
+        bom = _parse_descriptions(descr)
+    except Exception:  # metadata only — never fail the board
+        return
+    if not bom:
+        return
+    stripped: Dict[str, Dict[str, str]] = {}
+    for ref, ent in bom.items():
+        base, sep, tail = ref.rpartition("_")
+        if sep and base and tail.isdigit():
+            stripped.setdefault(base, ent)
+    for refdes, comp in model.components.items():
+        ent = bom.get(refdes) or stripped.get(refdes)
+        if ent is None:
+            continue
+        props: Dict[str, str] = {}
+        if ent["description"]:
+            props["description"] = ent["description"]
+        if ent["part_number"]:
+            props["part_number"] = ent["part_number"]
+        for i, alt in enumerate(ent["alternates"], 1):
+            props[f"alternate {i}"] = alt
+        # Keep anything the geometry pass already recorded (outline src).
+        props.update(comp.props)
+        comp.props = props
 
 
 __all__ = ["parse"]

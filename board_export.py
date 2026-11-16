@@ -337,6 +337,11 @@ def _open_board(path: str, key: Optional[str]) -> str:
             "outline": outline,
             "pins": pins,
         })
+        props = getattr(comp, "props", None)
+        if props:
+            # Optional BOM metadata (FZ): ordered label -> value pairs.
+            components[-1]["props"] = {
+                str(k): str(v) for k, v in props.items() if k != "outline"}
 
         # meta.bbox accumulates pins + outlines (contract SS1).
         if pins:

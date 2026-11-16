@@ -328,11 +328,18 @@ class ComponentInfoPanel(ttk.Frame):
             f"  device:   {comp.device}\n",
             "dim",
         )
+        props = dict(getattr(comp, "props", None) or {})
+        outline_src = props.pop("outline", None)
+        for label, value in props.items():
+            self.header_txt.insert(
+                "end", f"  {label.replace('_', ' ')}:  {value}\n", "dim")
         if shape:
             x0, y0, x1, y1 = shape.bbox()
+            src = (f"from {outline_src}" if outline_src
+                   and shape.bbox_override is not None else "from pin bbox")
             self.header_txt.insert(
                 "end",
-                f"  size:     {x1 - x0:.1f} × {y1 - y0:.1f} (mil, from pin bbox)\n"
+                f"  size:     {x1 - x0:.1f} × {y1 - y0:.1f} (mil, {src})\n"
                 f"  pins:     {len(shape.pins)} defined in shape\n",
                 "dim",
             )

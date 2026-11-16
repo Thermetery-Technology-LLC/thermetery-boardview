@@ -44,6 +44,8 @@ means unknown/none.
       "rotation": 0.0,              // degrees, as stored
       "bbox": [minx, miny, maxx, maxy],   // absolute, transform baked in
       "outline": [[x, y], ...],     // absolute polygon, or null (use bbox)
+      "props": {"description": "...", "part_number": "..."},  // optional BOM
+                                    // metadata (FZ); absent when none
       "pins": [
         {"name": "1", "x": 1.23, "y": 4.56, "net": 17}   // ABSOLUTE coords
       ]
