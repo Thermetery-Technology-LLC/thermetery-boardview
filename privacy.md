@@ -1,6 +1,6 @@
 # Thermetery Boardview — Privacy Policy
 
-*Effective: November 5, 2026*
+*Effective: November 17, 2026*
 
 Thermetery Technology LLC ("we") publishes Thermetery Boardview ("the app")
 for iPhone and iPad. This policy explains how the app handles information.
@@ -22,6 +22,18 @@ When you open a boardview file, the app copies it into its own private
 storage on your device so it can read it. These copies never leave your
 device. iOS may delete them when it needs space, and they are removed when
 you delete the app.
+
+## Recent boards
+
+To offer "Open recent", the app keeps a list of up to 10 boards you opened
+successfully: the file or folder name, its board format, when you last
+opened it, and a reference that lets the app reopen it (a bookmark to the
+original file or folder). When a board came from another app and cannot be
+reopened in place, the app keeps its own private copy of it instead (at
+most 256 MB in total). The list and these copies stay in the app's private
+storage on your device, are excluded from iCloud and device backups, and
+never leave your device. "Clear recent" deletes the list and the copies;
+removing an entry deletes its copy; deleting the app removes everything.
 
 ## Decryption keys
 

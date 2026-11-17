@@ -21,6 +21,13 @@ final class ViewController: UIViewController {
     private var tracesInFlight = false
     private var pickingFolder = false
 
+    /// Open recent (RecentStore.swift; mirrors MainActivity's recentIo):
+    /// list IO, bookmark resolution and copies run on this serial queue,
+    /// never the main queue or the Python worker.
+    private let recent = RecentStore()
+    private let recentQueue = DispatchQueue(label: "com.thermetery.boardview.recent",
+                                            qos: .userInitiated)
+
     private let maxKeyPrompts = 3           // mirrors viewer.py:_load_with_key_prompt
     private let maxAscMembers = 64
     private let maxAscMemberBytes: Int64 = 32 * 1024 * 1024
@@ -32,6 +39,8 @@ final class ViewController: UIViewController {
         var promptsUsed: Int
         var triedRemembered: Bool
         var rememberFormat: String?
+        /// Non-nil: record this source in the recent list on success.
+        var origin: RecentStore.Origin? = nil
     }
 
     // The window.Android shim: injected at document start (before viewer.js
@@ -51,6 +60,10 @@ final class ViewController: UIViewController {
         openLicenses: function () { post({cmd: 'openLicenses'}); },
         openUrl: function (url) { post({cmd: 'openUrl', url: String(url)}); },
         appInfo: function () { return window.__bvAppInfo || '{}'; },
+        listRecent: function () { post({cmd: 'listRecent'}); },
+        openRecent: function (id) { post({cmd: 'openRecent', id: String(id)}); },
+        removeRecent: function (id) { post({cmd: 'removeRecent', id: String(id)}); },
+        clearRecent: function () { post({cmd: 'clearRecent'}); },
         log: function (msg) { post({cmd: 'log', msg: String(msg)}); }
       };
       function pipe(level, args) {
@@ -196,8 +209,13 @@ final class ViewController: UIViewController {
         // never a file the user owns, e.g. our own Documents via file sharing.
         let path = url.standardizedFileURL.path
         let transient = path.contains("/Documents/Inbox/") || path.contains("/tmp/")
+        // An in-place URL gets a bookmark (made inside handleIncomingFile,
+        // while the scope is open); an Inbox copy cannot be reopened, so the
+        // recent entry falls back to an app-private copy.
+        let origin = RecentStore.Origin(kind: RecentStore.kindFile,
+                                        sourcePath: transient ? nil : path)
         handleIncomingFile(url: url, securityScoped: openInPlace,
-                           deleteOriginal: !openInPlace && transient)
+                           deleteOriginal: !openInPlace && transient, origin: origin)
     }
 
     private func sanitizeFileName(_ name: String) -> String {
@@ -219,8 +237,35 @@ final class ViewController: UIViewController {
         }
     }
 
-    private func handleIncomingFile(url: URL, securityScoped: Bool, deleteOriginal: Bool) {
-        let displayName = url.lastPathComponent.isEmpty ? "board" : url.lastPathComponent
+    /// Bookmark for reopening `url` later; call only while its security
+    /// scope is open. nil when the provider does not support bookmarks.
+    private static func makeBookmark(_ url: URL) -> Data? {
+        try? url.bookmarkData(options: .minimalBookmark,
+                              includingResourceValuesForKeys: nil, relativeTo: nil)
+    }
+
+    /// copyItem through NSFileCoordinator, so an in-place document from a
+    /// file provider (iCloud Drive, …) is downloaded / settled first.
+    private static func coordinatedCopy(from src: URL, to dest: URL) throws {
+        var coordinatorError: NSError?
+        var copyError: Error?
+        NSFileCoordinator(filePresenter: nil).coordinate(
+            readingItemAt: src, options: [.withoutChanges], error: &coordinatorError
+        ) { readURL in
+            do {
+                try FileManager.default.copyItem(at: readURL, to: dest)
+            } catch {
+                copyError = error
+            }
+        }
+        if let error = coordinatorError { throw error }
+        if let error = copyError { throw error }
+    }
+
+    private func handleIncomingFile(url: URL, securityScoped: Bool, deleteOriginal: Bool,
+                                    origin: RecentStore.Origin? = nil,
+                                    knownName: String? = nil) {
+        let displayName = knownName ?? (url.lastPathComponent.isEmpty ? "board" : url.lastPathComponent)
         let ext = (displayName as NSString).pathExtension.lowercased()
         if ext == "asc" {
             showAscFolderHint(displayName: displayName)
@@ -231,6 +276,11 @@ final class ViewController: UIViewController {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             let scoped = securityScoped && url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            var bookmarked = origin
+            if scoped, bookmarked != nil, bookmarked?.bookmark == nil {
+                bookmarked?.bookmark = Self.makeBookmark(url)
+            }
+            let source = bookmarked
             do {
                 let dir = boardsDir()
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -238,7 +288,11 @@ final class ViewController: UIViewController {
                 // build re-reads the path later; never delete after parse.
                 let dest = dir.appendingPathComponent(sanitizeFileName(displayName))
                 try? FileManager.default.removeItem(at: dest)
-                try FileManager.default.copyItem(at: url, to: dest)
+                if securityScoped {
+                    try Self.coordinatedCopy(from: url, to: dest)
+                } else {
+                    try FileManager.default.copyItem(at: url, to: dest)
+                }
                 if deleteOriginal {
                     try? FileManager.default.removeItem(at: url)
                 }
@@ -248,29 +302,44 @@ final class ViewController: UIViewController {
                     parseBoard(ParseAttempt(
                         file: dest, displayName: displayName, key: key,
                         promptsUsed: 0, triedRemembered: format != nil,
-                        rememberFormat: nil))
+                        rememberFormat: nil, origin: source))
                 }
             } catch {
                 DispatchQueue.main.async { [self] in
-                    postError("Could not read \(displayName): \(error.localizedDescription)")
-                    postStatus("")
+                    if let id = source?.recentId {
+                        recentUnavailable(id: id, name: displayName)
+                    } else {
+                        postError("Could not read \(displayName): \(error.localizedDescription)")
+                        postStatus("")
+                    }
                 }
             }
         }
     }
 
-    private func handleIncomingTree(url: URL) {
-        let dirName = sanitizeFileName(url.lastPathComponent.isEmpty ? "board" : url.lastPathComponent)
+    private func handleIncomingTree(url: URL, origin: RecentStore.Origin? = nil,
+                                    knownName: String? = nil) {
+        let dirName = knownName ??
+            sanitizeFileName(url.lastPathComponent.isEmpty ? "board" : url.lastPathComponent)
         postStatus("Parsing \(dirName)…")
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            var bookmarked = origin
+            if scoped, bookmarked != nil, bookmarked?.bookmark == nil {
+                bookmarked?.bookmark = Self.makeBookmark(url)
+            }
+            let source = bookmarked
             let fm = FileManager.default
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
                 DispatchQueue.main.async { [self] in
-                    postError("Could not open the picked folder.")
-                    postStatus("")
+                    if let id = source?.recentId {
+                        recentUnavailable(id: id, name: dirName)
+                    } else {
+                        postError("Could not open the picked folder.")
+                        postStatus("")
+                    }
                 }
                 return
             }
@@ -297,6 +366,11 @@ final class ViewController: UIViewController {
                 }
                 DispatchQueue.main.async { [self] in
                     if copied == 0 {
+                        if let id = source?.recentId {
+                            // The remembered folder no longer holds the set.
+                            recentUnavailable(id: id, name: dirName)
+                            return
+                        }
                         postError("\(dirName) contains no .asc files — pick the folder holding the parts/pins/… .asc set.")
                         postStatus("")
                         return
@@ -304,12 +378,17 @@ final class ViewController: UIViewController {
                     // ASC sets are plaintext — no key slot applies.
                     parseBoard(ParseAttempt(
                         file: dest, displayName: dirName, key: nil,
-                        promptsUsed: 0, triedRemembered: true, rememberFormat: nil))
+                        promptsUsed: 0, triedRemembered: true, rememberFormat: nil,
+                        origin: source))
                 }
             } catch {
                 DispatchQueue.main.async { [self] in
-                    postError("Could not copy \(dirName): \(error.localizedDescription)")
-                    postStatus("")
+                    if let id = source?.recentId {
+                        recentUnavailable(id: id, name: dirName)
+                    } else {
+                        postError("Could not copy \(dirName): \(error.localizedDescription)")
+                        postStatus("")
+                    }
                 }
             }
         }
@@ -351,6 +430,16 @@ final class ViewController: UIViewController {
             tracesInFlight = false
             runJs("window.bv && bv.onBoard(\(raw));")
             postStatus("")
+            if let origin = attempt.origin {
+                let format = (json["meta"] as? [String: Any])?["format"] as? String ?? ""
+                let name = attempt.displayName
+                let file = attempt.file
+                recentQueue.async { [weak self] in
+                    guard let self else { return }
+                    self.recent.record(origin: origin, name: name, parsed: file, format: format)
+                    self.pushRecent()
+                }
+            }
             return
         }
 
@@ -476,11 +565,109 @@ final class ViewController: UIViewController {
         }
     }
 
+    // MARK: - Open recent (mirrors MainActivity's "open recent" section)
+
+    /// Must run on recentQueue. Answers with bv.onRecent({items:[…]}).
+    private func pushRecent() {
+        let json = recent.json()
+        DispatchQueue.main.async { [weak self] in
+            self?.runJs("window.bv && bv.onRecent && bv.onRecent(\(json));")
+        }
+    }
+
+    private func requestRecentList() {
+        recentQueue.async { [weak self] in self?.pushRecent() }
+    }
+
+    private func removeRecent(_ id: String) {
+        recentQueue.async { [weak self] in
+            guard let self else { return }
+            self.recent.remove(id)
+            self.pushRecent()
+        }
+    }
+
+    private func clearRecent() {
+        recentQueue.async { [weak self] in
+            guard let self else { return }
+            self.recent.clear()
+            self.pushRecent()
+        }
+    }
+
+    /// Reopen without the document picker: through the bookmark when it
+    /// still resolves, else the app-private copy. Every read failure lands
+    /// in recentUnavailable.
+    private func openRecent(_ id: String) {
+        recentQueue.async { [weak self] in
+            guard let self else { return }
+            guard let e = self.recent.get(id) else {
+                DispatchQueue.main.async {
+                    self.postError("That board is no longer in the recent list.")
+                }
+                self.pushRecent()
+                return
+            }
+            let folder = e.kind == RecentStore.kindFolder
+            if let bookmark = e.bookmark, let resolved = self.recent.resolve(bookmark) {
+                // A stale bookmark is re-made from the resolved URL while
+                // its scope is open (origin.bookmark == nil does that).
+                let origin = RecentStore.Origin(
+                    kind: e.kind, bookmark: resolved.stale ? nil : bookmark,
+                    sourcePath: resolved.url.standardizedFileURL.path, recentId: e.id)
+                DispatchQueue.main.async {
+                    if folder {
+                        self.handleIncomingTree(url: resolved.url, origin: origin, knownName: e.name)
+                    } else {
+                        self.handleIncomingFile(url: resolved.url, securityScoped: true,
+                                                deleteOriginal: false, origin: origin,
+                                                knownName: e.name)
+                    }
+                }
+            } else if let copy = self.recent.copyURL(e) {
+                let origin = RecentStore.Origin(kind: e.kind, sourcePath: e.sourcePath,
+                                                recentId: e.id, fromCopy: true)
+                DispatchQueue.main.async {
+                    if folder {
+                        self.handleIncomingTree(url: copy, origin: origin, knownName: e.name)
+                    } else {
+                        self.handleIncomingFile(url: copy, securityScoped: false,
+                                                deleteOriginal: false, origin: origin,
+                                                knownName: e.name)
+                    }
+                }
+            } else {
+                DispatchQueue.main.async { self.recentUnavailable(id: e.id, name: e.name) }
+            }
+        }
+    }
+
+    /// A recent entry's source is gone or no longer readable: say so and
+    /// offer to forget it (it may only be temporarily away, e.g. an
+    /// unreachable file provider, so it is not dropped silently).
+    private func recentUnavailable(id: String, name: String) {
+        postError("Can't reopen \(name): it was moved or deleted, or Boardview no longer has access to it.")
+        postStatus("")
+        requestRecentList()   // refresh the "unavailable" marks
+        guard presentedViewController == nil else { return }   // the toast still shows
+        let alert = UIAlertController(
+            title: "Board unavailable",
+            message: "\(name) can't be opened — it was moved or deleted, or Boardview's access to it was revoked.\n\nRemove it from Recent?",
+            preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Keep", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Remove", style: .destructive) { [weak self] _ in
+            self?.removeRecent(id)
+        })
+        present(alert, animated: true)
+    }
+
     // MARK: - Pickers / secondary screens
 
     private func launchFilePicker() {
         // Android passes MIME */* and lets the parser decide; same here.
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
+        // Opened in place (asCopy: false) so the pick can be bookmarked for
+        // Open recent; handleIncomingFile copies it under the security scope.
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: false)
         picker.delegate = self
         picker.allowsMultipleSelection = false
         pickingFolder = false
@@ -521,6 +708,14 @@ extension ViewController: WKScriptMessageHandler {
             launchKeyManager()
         case "openLicenses":
             present(LicensesViewController(), animated: true)
+        case "listRecent":
+            requestRecentList()
+        case "openRecent":
+            if let id = body["id"] as? String { openRecent(id) }
+        case "removeRecent":
+            if let id = body["id"] as? String { removeRecent(id) }
+        case "clearRecent":
+            clearRecent()
         case "openUrl":
             let raw = body["url"] as? String ?? ""
             if Self.isAllowedExternalURL(raw), let url = URL(string: raw) {
@@ -566,12 +761,16 @@ extension ViewController: UIDocumentPickerDelegate {
     func documentPicker(_ controller: UIDocumentPickerViewController,
                         didPickDocumentsAt urls: [URL]) {
         guard let url = urls.first else { return }
+        let path = url.standardizedFileURL.path
         if pickingFolder {
-            handleIncomingTree(url: url)
+            handleIncomingTree(url: url, origin: RecentStore.Origin(
+                kind: RecentStore.kindFolder, sourcePath: path))
         } else {
-            // asCopy:true hands us a temporary app-local copy — no security
-            // scope needed; remove it after staging into caches/boards.
-            handleIncomingFile(url: url, securityScoped: false, deleteOriginal: true)
+            // asCopy:false hands us the security-scoped original: stage a
+            // copy into caches/boards and bookmark it for Open recent.
+            handleIncomingFile(url: url, securityScoped: true, deleteOriginal: false,
+                               origin: RecentStore.Origin(kind: RecentStore.kindFile,
+                                                          sourcePath: path))
         }
     }
 }
