@@ -390,10 +390,11 @@ html, body {
 }
 
 .bv-netrow {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr) auto;
+  align-content: start;
   align-items: baseline;
-  gap: 12px;
+  gap: 2px 12px;
   padding: 7px 14px;
   border-bottom: 1px solid rgba(42, 48, 82, 0.5);
   cursor: pointer;
@@ -402,7 +403,7 @@ html, body {
 
 .bv-netrow:active { background: #1a2040; }
 .bv-netrow.sel { background: #16224a; }
-.bv-netrow.more { color: var(--fg-dim); cursor: default; }
+.bv-netrow.more { display: block; color: var(--fg-dim); cursor: default; }
 
 .bv-netref {
   flex: 0 0 76px;
@@ -434,13 +435,13 @@ html, body {
 
 /* secondary line: device + footprint, dimmer, ellipsised */
 .bv-netsub {
-  flex: 1 0 100%;
+  grid-column: 1 / -1;
   display: flex;
   gap: 12px;
   min-width: 0;
-  margin-top: 2px;
   font-size: 11px;
   color: var(--fg-dim);
+  opacity: 0.8;
 }
 .bv-netdev, .bv-netshape {
   overflow: hidden;
