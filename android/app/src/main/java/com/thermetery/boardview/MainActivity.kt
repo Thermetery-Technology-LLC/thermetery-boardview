@@ -646,8 +646,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun sanitizeFileName(name: String): String =
-        name.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+    private fun sanitizeFileName(name: String): String = safeFileName(name)
 
     /** Key slot implied by a filename, before an expensive keyless parse. */
     private fun rememberedKeyFormat(displayName: String): String? =

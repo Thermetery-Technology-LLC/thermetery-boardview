@@ -71,6 +71,18 @@ final class RecentStore {
         }
     }
 
+    /// A provider-supplied name made safe as ONE path component under an
+    /// app directory: path/reserved characters become "_", and an empty,
+    /// "." or ".." result becomes "board" (appending ".." would escape the
+    /// directory). Mirrors android `safeFileName`; shared with
+    /// ViewController.sanitizeFileName.
+    static func safeFileName(_ name: String) -> String {
+        let s = name.replacingOccurrences(
+            of: "[\\\\/:*?\"<>|]", with: "_", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (s.isEmpty || s == "." || s == "..") ? "board" : s
+    }
+
     private struct ListFile: Codable {
         var version: Int
         var items: [Entry]
@@ -236,9 +248,7 @@ final class RecentStore {
 
     private func makeCopy(id: String, name: String, parsed: URL) -> String? {
         let dir = copiesRoot.appendingPathComponent(id, isDirectory: true)
-        let fileName = name.replacingOccurrences(
-            of: "[\\\\/:*?\"<>|]", with: "_", options: .regularExpression)
-        let safeName = fileName.isEmpty ? "board" : fileName
+        let safeName = Self.safeFileName(name)
         do {
             try? fm.removeItem(at: dir)
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)

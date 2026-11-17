@@ -669,21 +669,6 @@ html, body {
 
 /* ---------- open recent ---------- */
 
-/* Open + ▾ read as one split button: Open opens the picker, ▾ the list. */
-#bv-toolbar #bv-btn-open.split {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
-}
-#bv-toolbar #bv-btn-recent {
-  min-width: 30px;
-  margin-left: -6px;          /* cancel the strip gap: joined to Open */
-  padding: 0 6px;
-  border-left-color: #12172f;
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
-  font-size: 12px;
-}
-
 /* Empty-screen list (desktop StartupLauncher). Click-through outside the
    card so the canvas underneath stays the background. */
 #bv-home {

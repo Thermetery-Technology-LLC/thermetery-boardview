@@ -91,6 +91,31 @@ class BridgeParityTest(unittest.TestCase):
         self.assertRegex(html, r'<div id="bv-recent" class="hidden"')
 
 
+    def test_recent_button_does_not_push_mirror_off_screen(self):
+        # Contract §5: Open…Mirror must fit a 375 px strip, so the Recent
+        # entry point sits after the rotate buttons.
+        html = _read(ASSETS / "viewer.html")
+        self.assertGreater(html.index('id="bv-btn-recent"'), html.index('id="bv-btn-rotr"'))
+
+
+class SafeFileNameTest(unittest.TestCase):
+    """Copies are named after provider-supplied display names; "." and
+    ".." must never survive as a path component (File(dir, "..") escapes
+    dir). Static check — the shells have no unit-test target here."""
+
+    def test_kotlin_rejects_dot_names(self):
+        kt = _read(KT_DIR / "RecentStore.kt")
+        body = re.search(r"internal fun safeFileName\(.*?\n\}", kt, re.S).group(0)
+        self.assertIn('s == "." || s == ".."', body)
+        self.assertIn("= safeFileName(name)", _read(KT_DIR / "MainActivity.kt"))
+
+    def test_swift_rejects_dot_names(self):
+        swift = _read(SWIFT_DIR / "RecentStore.swift")
+        body = re.search(r"static func safeFileName\(.*?\n    \}", swift, re.S).group(0)
+        self.assertIn('s == "." || s == ".."', body)
+        self.assertIn("RecentStore.safeFileName(name)", _read(SWIFT_DIR / "ViewController.swift"))
+
+
 class RecentLimitsTest(unittest.TestCase):
     def test_limit_matches_desktop(self):
         desktop = int(re.search(r"^_RECENT_LIMIT = (\d+)", _read(ROOT / "src" / "viewer.py"),

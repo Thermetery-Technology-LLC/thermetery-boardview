@@ -12,6 +12,18 @@ import java.io.File
 import java.util.UUID
 
 /**
+ * A provider-supplied display name made safe as ONE path component under
+ * an app directory: path/reserved characters become "_", and an empty,
+ * "." or ".." result becomes "board" — `File(dir, "..")` would otherwise
+ * escape `dir` (a hostile provider can report any DISPLAY_NAME or folder
+ * name). Shared by the session copies (MainActivity) and recent copies.
+ */
+internal fun safeFileName(name: String): String {
+    val s = name.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
+    return if (s.isEmpty() || s == "." || s == "..") "board" else s
+}
+
+/**
  * The "Open recent" list (contract §4 listRecent / openRecent /
  * removeRecent / clearRecent; desktop parity with viewer.py
  * `_remember_board_opened` / `_get_recent` / `_clear_recent_persisted`).
@@ -285,7 +297,7 @@ class RecentStore(private val context: Context) {
 
     private fun makeCopy(id: String, name: String, parsed: File): String? {
         val dir = File(copiesRoot, id)
-        val fileName = name.replace(Regex("[\\\\/:*?\"<>|]"), "_").ifEmpty { "board" }
+        val fileName = safeFileName(name)
         return try {
             dir.deleteRecursively()
             dir.mkdirs()

@@ -314,9 +314,14 @@ Desktop parity with `viewer.py`'s File ▸ Open recent / startup launcher.
   Remove it from Recent?" dialog (Remove / Keep). Parse errors of a still
   readable file are reported as usual and keep the entry.
 - **UI:** the empty screen lists recent boards (with Clear recent); while a
-  board is open the list is behind the ▾ half of the Open split button
-  (`#bv-btn-recent`). Each row: name, format, last opened; ✕ removes the
-  row. Clear recent needs a second tap within 3 s.
+  board is open the list is behind the toolbar's **Recent** button
+  (`#bv-btn-recent`, after Measure — never before Mirror, see §5). Each
+  row: name, format, last opened; ✕ removes the row. Clear recent needs a
+  second tap within 3 s.
+- **Copy names:** every app-private copy (session copy in `boards/`, recent
+  copy) is named by `safeFileName`: path/reserved characters → `_`, and an
+  empty, `.` or `..` name → `board`, so a hostile provider's display name
+  can never escape the target directory.
 
 ## 7. What v1 explicitly does NOT include
 

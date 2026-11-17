@@ -219,9 +219,7 @@ final class ViewController: UIViewController {
     }
 
     private func sanitizeFileName(_ name: String) -> String {
-        let sanitized = name.replacingOccurrences(
-            of: "[\\\\/:*?\"<>|]", with: "_", options: .regularExpression)
-        return sanitized.isEmpty ? "board" : sanitized
+        RecentStore.safeFileName(name)
     }
 
     private func boardsDir() -> URL {

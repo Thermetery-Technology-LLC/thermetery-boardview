@@ -2433,8 +2433,8 @@
    *  answered asynchronously with bv.onRecent({items:[{id, name, kind,
    *  format, openedAt, available}]}), and the shell pushes it again after
    *  every change (a board opened, an entry removed, Clear recent). The
-   *  list shows on the empty screen (#bv-home) and from the ▾ half of the
-   *  Open split button (#bv-recent). The dev harness has no shell, so the
+   *  list shows on the empty screen (#bv-home) and from the toolbar's
+   *  Recent button (#bv-recent). The dev harness has no shell, so the
    *  whole feature stays hidden there.
    * ------------------------------------------------------------------ */
   var hasRecent = hasAndroid && typeof window.Android.listRecent === "function" &&
@@ -2614,7 +2614,6 @@
   if (hasRecent) {
     if (btnRecent) {
       btnRecent.classList.remove("hidden");
-      btnOpen.classList.add("split");
       btnRecent.addEventListener("click", openRecentSheet);
     }
     if (elHome) elHome.addEventListener("click", onRecentClick);
