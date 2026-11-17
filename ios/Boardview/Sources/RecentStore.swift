@@ -114,6 +114,10 @@ final class RecentStore {
             let scoped = resolved.url.startAccessingSecurityScopedResource()
             defer { if scoped { resolved.url.stopAccessingSecurityScopedResource() } }
             if fm.fileExists(atPath: resolved.url.path) { return true }
+            // An evicted iCloud Drive file can be missing locally yet still
+            // open (the coordinated read downloads it).
+            let cloud = try? resolved.url.resourceValues(forKeys: [.isUbiquitousItemKey])
+            if cloud?.isUbiquitousItem == true { return true }
         }
         return copyURL(e) != nil
     }
@@ -137,6 +141,11 @@ final class RecentStore {
     @discardableResult
     func record(origin: Origin, name: String, parsed: URL, format: String) -> Entry? {
         var entries = load()
+        // A same-named board opened right after this one replaces the
+        // session copy; never record (or copy) a missing / partial file.
+        guard fm.fileExists(atPath: parsed.path) else {
+            return origin.recentId.flatMap { id in entries.first { $0.id == id } }
+        }
         let size = sizeOf(parsed)
 
         var existingIndex: Int?

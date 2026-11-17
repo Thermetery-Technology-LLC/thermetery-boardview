@@ -360,8 +360,11 @@ final class ViewController: UIViewController {
                         Self.shellLog.warning("Skipping oversized .asc member \(child.lastPathComponent, privacy: .public)")
                         continue
                     }
-                    try fm.copyItem(at: child,
-                                    to: dest.appendingPathComponent(sanitizeFileName(child.lastPathComponent)))
+                    // Coordinated, so a reopened folder on a file provider
+                    // (iCloud Drive, …) has its members downloaded first.
+                    try Self.coordinatedCopy(
+                        from: child,
+                        to: dest.appendingPathComponent(sanitizeFileName(child.lastPathComponent)))
                     copied += 1
                 }
                 DispatchQueue.main.async { [self] in

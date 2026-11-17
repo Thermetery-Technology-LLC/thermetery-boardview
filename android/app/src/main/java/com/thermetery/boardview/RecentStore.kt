@@ -160,6 +160,9 @@ class RecentStore(private val context: Context) {
     @Synchronized
     fun record(origin: Origin, name: String, parsed: File, format: String): Entry? {
         val entries = load().toMutableList()
+        // A same-named board opened right after this one replaces the
+        // session copy; never record (or copy) a missing / partial file.
+        if (!parsed.exists()) return origin.recentId?.let { id -> entries.firstOrNull { it.id == id } }
         val size = sizeOf(parsed)
         val uriStr = origin.uri?.toString()
 
