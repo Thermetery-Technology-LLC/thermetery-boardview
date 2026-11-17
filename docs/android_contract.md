@@ -44,6 +44,10 @@ means unknown/none.
       "rotation": 0.0,              // degrees, as stored
       "bbox": [minx, miny, maxx, maxy],   // absolute, transform baked in
       "outline": [[x, y], ...],     // absolute polygon, or null (use bbox)
+      "device": "10K",              // optional: Component.device (value /
+                                    // part); key omitted when empty
+      "shape": "R0402",             // optional: Component.shape (footprint
+                                    // name); key omitted when empty
       "props": {"description": "...", "part_number": "..."},  // optional BOM
                                     // metadata (FZ); absent when none
       "pins": [

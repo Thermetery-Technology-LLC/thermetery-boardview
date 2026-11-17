@@ -337,6 +337,12 @@ def _open_board(path: str, key: Optional[str]) -> str:
             "outline": outline,
             "pins": pins,
         })
+        # Net-tab columns (desktop parity): omitted when empty to keep the
+        # JSON lean on boards with tens of thousands of parts.
+        if comp.device:
+            components[-1]["device"] = str(comp.device)
+        if comp.shape:
+            components[-1]["shape"] = str(comp.shape)
         props = getattr(comp, "props", None)
         if props:
             # Optional BOM metadata (FZ): ordered label -> value pairs.
