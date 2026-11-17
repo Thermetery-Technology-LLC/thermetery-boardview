@@ -13,6 +13,9 @@
 <div id="bv-toolbar">
   <div id="bv-btnstrip">
     <button id="bv-btn-open"   type="button" title="Open board">Open</button>
+    <!-- Split-button half of Open: the recent list. Shown only when the
+         shell implements listRecent (never in the dev harness). -->
+    <button id="bv-btn-recent" class="hidden" type="button" title="Open recent" aria-label="Open recent" aria-haspopup="dialog">&#9662;</button>
     <button id="bv-btn-opendir" type="button" title="Open ICT folder (.asc set)">Folder</button>
     <button id="bv-btn-layer"  type="button" title="Cycle layer">ALL</button>
     <button id="bv-btn-traces" type="button" title="Toggle traces">Traces</button>
@@ -94,6 +97,31 @@
         <button id="bv-about-license" class="bv-about-textlink" type="button">GNU LGPL v3.0 text</button>
         <button id="bv-about-thirdparty" class="bv-about-textlink hidden" type="button">Third-party licenses</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Open recent. #bv-home: the list on the empty "Open a board file"
+     screen; #bv-recent: the same list as a dialog from the toolbar. -->
+<div id="bv-home" class="hidden">
+  <div id="bv-home-card">
+    <div id="bv-home-hint">Open a board file, or pick a recent one</div>
+    <div class="bv-recent-head">
+      <span class="bv-recent-heading">Recent boards</span>
+      <button class="bv-recent-clear" type="button">Clear recent</button>
+    </div>
+    <div class="bv-recent-list" role="list"></div>
+  </div>
+</div>
+
+<div id="bv-recent" class="hidden" role="dialog" aria-modal="true" aria-labelledby="bv-recent-title">
+  <div id="bv-recent-card">
+    <button id="bv-recent-close" type="button" title="Close" aria-label="Close">&#10005;</button>
+    <h1 id="bv-recent-title">Open recent</h1>
+    <div class="bv-recent-list" role="list"></div>
+    <div class="bv-recent-empty hidden">No recent boards yet. Boards you open appear here.</div>
+    <div class="bv-recent-foot">
+      <button class="bv-recent-clear" type="button">Clear recent</button>
     </div>
   </div>
 </div>

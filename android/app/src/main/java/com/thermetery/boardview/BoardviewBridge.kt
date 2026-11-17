@@ -42,6 +42,29 @@ class BoardviewBridge(private val activity: MainActivity) {
         activity.runOnUiThread { activity.openExternalUrl(url) }
     }
 
+    // Open recent (contract §4). All async: the shell answers listRecent
+    // (and every change to the list) with bv.onRecent({items:[…]}).
+
+    @JavascriptInterface
+    fun listRecent() {
+        activity.requestRecentList()
+    }
+
+    @JavascriptInterface
+    fun openRecent(id: String) {
+        activity.openRecent(id)
+    }
+
+    @JavascriptInterface
+    fun removeRecent(id: String) {
+        activity.removeRecent(id)
+    }
+
+    @JavascriptInterface
+    fun clearRecent() {
+        activity.clearRecent()
+    }
+
     /** Synchronous: the About page reads the build it is running as. */
     @JavascriptInterface
     fun appInfo(): String = activity.appInfoJson()

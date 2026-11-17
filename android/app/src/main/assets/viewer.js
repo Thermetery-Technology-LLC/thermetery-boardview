@@ -530,6 +530,7 @@
       updateButtons();
       fitView();
       updateStatus();
+      updateHome();
       if (board.meta.warnings && board.meta.warnings.length) {
         alog("board warnings: " + board.meta.warnings.join(" | "));
       }
@@ -889,6 +890,7 @@
     ctx.fillRect(0, 0, cssW, cssH);
 
     if (!board) {
+      if (homeShown) return;          // the recent list carries the hint
       ctx.fillStyle = "#3a4170";
       ctx.font = "16px sans-serif";
       ctx.textAlign = "center";
@@ -2422,6 +2424,211 @@
       if (tracesLoaded) { showTraces = true; updateButtons(); needRaster = true; }
       scheduleRender();
     }, 120);
+  }
+
+  /* ------------------------------------------------------------------ *
+   *  Open recent (desktop File > Open recent + StartupLauncher)
+   *
+   *  The shells own the list (contract §4): Android.listRecent() is
+   *  answered asynchronously with bv.onRecent({items:[{id, name, kind,
+   *  format, openedAt, available}]}), and the shell pushes it again after
+   *  every change (a board opened, an entry removed, Clear recent). The
+   *  list shows on the empty screen (#bv-home) and from the ▾ half of the
+   *  Open split button (#bv-recent). The dev harness has no shell, so the
+   *  whole feature stays hidden there.
+   * ------------------------------------------------------------------ */
+  var hasRecent = hasAndroid && typeof window.Android.listRecent === "function" &&
+                  typeof window.Android.openRecent === "function";
+  var recentItems = [];
+  var homeShown = false;
+  var elHome = document.getElementById("bv-home");
+  var elRecent = document.getElementById("bv-recent");
+  var btnRecent = document.getElementById("bv-btn-recent");
+
+  var FORMAT_LABELS = {
+    "tvw": "TVW", "tvw-compal": "TVW (Compal)", "fz": "ASUS FZ",
+    "xzzpcb": "XZZ PCB", "xzz": "XZZ PCB", "gencad": "GenCAD", "brd": "BRD",
+    "asc": "eM-Test ASC", "bv": "BV"
+  };
+
+  function formatLabel(fmt) {
+    fmt = String(fmt || "");
+    if (!fmt) return "";
+    return FORMAT_LABELS[fmt.toLowerCase()] || fmt.toUpperCase();
+  }
+
+  // "just now", "5 min ago", "3 h ago", "yesterday", "4 days ago", else a date.
+  function openedAgo(ms, now) {
+    if (!ms) return "";
+    var s = Math.max(0, (now - ms) / 1000);
+    if (s < 60) return "just now";
+    if (s < 3600) return Math.floor(s / 60) + " min ago";
+    if (s < 86400) return Math.floor(s / 3600) + " h ago";
+    if (s < 2 * 86400) return "yesterday";
+    if (s < 7 * 86400) return Math.floor(s / 86400) + " days ago";
+    try {
+      return new Date(ms).toLocaleDateString(undefined,
+        { year: "numeric", month: "short", day: "numeric" });
+    } catch (e) { return new Date(ms).toDateString(); }
+  }
+
+  function recentRow(it, now) {
+    var row = document.createElement("div");
+    row.className = "bv-recent-row" + (it.available === false ? " missing" : "");
+    row.setAttribute("role", "listitem");
+
+    var open = document.createElement("button");
+    open.type = "button";
+    open.className = "bv-recent-open";
+    open.setAttribute("data-id", String(it.id));
+    var name = document.createElement("span");
+    name.className = "bv-recent-name";
+    name.textContent = String(it.name || "board");
+    var sub = document.createElement("span");
+    sub.className = "bv-recent-sub";
+    var bits = [];
+    if (it.kind === "folder") bits.push("Folder");
+    var fl = formatLabel(it.format);
+    if (fl) bits.push(fl);
+    if (it.available === false) bits.push("unavailable");
+    var ago = openedAgo(Number(it.openedAt) || 0, now);
+    if (ago) bits.push(ago);
+    sub.textContent = bits.join("  ·  ");
+    if (it.openedAt) {
+      try { open.title = "Last opened " + new Date(Number(it.openedAt)).toLocaleString(); }
+      catch (e) { /* no title */ }
+    }
+    open.appendChild(name);
+    open.appendChild(sub);
+
+    var rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "bv-recent-remove";
+    rm.setAttribute("data-id", String(it.id));
+    rm.title = "Remove from recent";
+    rm.setAttribute("aria-label", "Remove " + name.textContent + " from recent");
+    rm.textContent = "✕";
+
+    row.appendChild(open);
+    row.appendChild(rm);
+    return row;
+  }
+
+  function fillRecentList(listEl) {
+    if (!listEl) return;
+    listEl.textContent = "";
+    var now = Date.now();
+    for (var i = 0; i < recentItems.length; i++) {
+      listEl.appendChild(recentRow(recentItems[i], now));
+    }
+  }
+
+  function updateHome() {
+    if (!elHome) return;
+    var show = hasRecent && !board && recentItems.length > 0;
+    if (show !== homeShown) {
+      homeShown = show;
+      elHome.classList.toggle("hidden", !show);
+      scheduleRender();            // toggles the canvas "Open a board file" hint
+    }
+  }
+
+  function renderRecent() {
+    if (elHome) fillRecentList(elHome.querySelector(".bv-recent-list"));
+    if (elRecent) {
+      fillRecentList(elRecent.querySelector(".bv-recent-list"));
+      var empty = elRecent.querySelector(".bv-recent-empty");
+      if (empty) empty.classList.toggle("hidden", recentItems.length > 0);
+      var foot = elRecent.querySelector(".bv-recent-foot");
+      if (foot) foot.classList.toggle("hidden", recentItems.length === 0);
+    }
+    disarmClear();
+    updateHome();
+  }
+
+  function openRecentSheet() {
+    if (!elRecent || !hasRecent) return;
+    renderRecent();
+    elRecent.classList.remove("hidden");
+    try { window.Android.listRecent(); } catch (e) { alog("listRecent: " + e); }
+  }
+
+  function closeRecentSheet() {
+    if (elRecent) elRecent.classList.add("hidden");
+    disarmClear();
+  }
+
+  // Desktop clears without asking; on a touch screen a stray tap is easy,
+  // so the first tap arms the button and a second one within 3 s clears.
+  // (No confirm(): WKWebView without a UI delegate answers it false.)
+  var clearArmed = false, clearTimer = 0;
+  function disarmClear() {
+    clearArmed = false;
+    clearTimeout(clearTimer);
+    var btns = document.querySelectorAll(".bv-recent-clear");
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].textContent = "Clear recent";
+      btns[i].classList.remove("armed");
+    }
+  }
+  function clearRecentTap(btn) {
+    if (!clearArmed) {
+      disarmClear();
+      clearArmed = true;
+      btn.textContent = "Tap again to clear";
+      btn.classList.add("armed");
+      clearTimer = setTimeout(disarmClear, 3000);
+      return;
+    }
+    disarmClear();
+    try { window.Android.clearRecent(); } catch (e) { alog("clearRecent: " + e); }
+  }
+
+  function onRecentClick(e) {
+    var t = e.target;
+    while (t && t !== e.currentTarget && !(t.classList && (
+      t.classList.contains("bv-recent-open") || t.classList.contains("bv-recent-remove") ||
+      t.classList.contains("bv-recent-clear")))) t = t.parentNode;
+    if (!t || t === e.currentTarget) return;
+    if (t.classList.contains("bv-recent-clear")) { clearRecentTap(t); return; }
+    var id = t.getAttribute("data-id");
+    if (!id) return;
+    if (t.classList.contains("bv-recent-remove")) {
+      try { window.Android.removeRecent(id); } catch (e2) { alog("removeRecent: " + e2); }
+      return;
+    }
+    closeRecentSheet();
+    try { window.Android.openRecent(id); } catch (e3) { alog("openRecent: " + e3); }
+  }
+
+  window.bv.onRecent = function (json) {
+    var obj = parseMaybe(json);
+    var items = (obj && obj.items && obj.items.length !== undefined) ? obj.items : [];
+    recentItems = [];
+    for (var i = 0; i < items.length; i++) {
+      if (items[i] && items[i].id != null) recentItems.push(items[i]);
+    }
+    renderRecent();
+  };
+
+  if (hasRecent) {
+    if (btnRecent) {
+      btnRecent.classList.remove("hidden");
+      btnOpen.classList.add("split");
+      btnRecent.addEventListener("click", openRecentSheet);
+    }
+    if (elHome) elHome.addEventListener("click", onRecentClick);
+    if (elRecent) {
+      elRecent.addEventListener("click", function (e) {
+        if (e.target === elRecent) { closeRecentSheet(); return; }   // backdrop
+        onRecentClick(e);
+      });
+      document.getElementById("bv-recent-close").addEventListener("click", closeRecentSheet);
+      document.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") closeRecentSheet();
+      });
+    }
+    try { window.Android.listRecent(); } catch (e) { alog("listRecent: " + e); }
   }
 
   /* ------------------------------------------------------------------ *

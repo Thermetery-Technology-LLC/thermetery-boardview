@@ -667,6 +667,218 @@ html, body {
   cursor: pointer;
 }
 
+/* ---------- open recent ---------- */
+
+/* Open + ▾ read as one split button: Open opens the picker, ▾ the list. */
+#bv-toolbar #bv-btn-open.split {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+#bv-toolbar #bv-btn-recent {
+  min-width: 30px;
+  margin-left: -6px;          /* cancel the strip gap: joined to Open */
+  padding: 0 6px;
+  border-left-color: #12172f;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  font-size: 12px;
+}
+
+/* Empty-screen list (desktop StartupLauncher). Click-through outside the
+   card so the canvas underneath stays the background. */
+#bv-home {
+  position: fixed;
+  top: calc(var(--bar-h, 92px) + 16px);
+  left: 0;
+  right: 0;
+  bottom: calc(28px + env(safe-area-inset-bottom, 0px));
+  z-index: 15;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 0 14px;
+  pointer-events: none;
+}
+
+#bv-home-card {
+  width: 100%;
+  max-width: 460px;
+  max-height: 100%;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  pointer-events: auto;
+}
+
+#bv-home-hint {
+  margin: 4px 0 18px 0;
+  text-align: center;
+  font-size: 15px;
+  color: #6a72a8;
+}
+
+.bv-recent-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.bv-recent-heading {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+#bv-recent {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(16px + env(safe-area-inset-top, 0px)) 16px
+           calc(16px + env(safe-area-inset-bottom, 0px)) 16px;
+  background: rgba(5, 7, 18, 0.72);
+}
+
+#bv-recent-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 460px;
+  max-height: 100%;
+  padding: 18px 14px 12px 14px;
+  background: #141938;
+  border: 1px solid var(--bar-border);
+  border-radius: 14px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+}
+
+#bv-recent-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 16px;
+  background: #2a3052;
+  color: var(--fg);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+#bv-recent-title {
+  margin: 0 40px 12px 6px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+#bv-recent-card .bv-recent-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+.bv-recent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bv-recent-row {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--bar-border);
+  border-radius: 8px;
+  background: #1a2040;
+  overflow: hidden;
+}
+
+.bv-recent-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 12px;
+  border: none;
+  background: none;
+  color: var(--fg);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bv-recent-open:active,
+.bv-recent-remove:active { background: #2a3460; }
+
+.bv-recent-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-family: var(--mono);
+  color: var(--fg);
+}
+
+.bv-recent-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.bv-recent-row.missing .bv-recent-name {
+  color: #6a7099;
+}
+.bv-recent-row.missing .bv-recent-sub { color: #8a6a80; }
+
+.bv-recent-remove {
+  flex: 0 0 44px;
+  border: none;
+  border-left: 1px solid var(--bar-border);
+  background: none;
+  color: var(--fg-dim);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.bv-recent-empty {
+  padding: 18px 6px;
+  font-size: 13px;
+  color: var(--fg-dim);
+}
+
+.bv-recent-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.bv-recent-clear {
+  padding: 8px 6px;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.bv-recent-clear.armed {
+  color: var(--danger);
+  font-weight: 600;
+}
+
 /* ---------- status line (bottom-left) ---------- */
 
 #bv-status {
