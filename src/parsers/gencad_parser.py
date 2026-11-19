@@ -132,6 +132,10 @@ class Component:
     rotation: float = 0.0
     shape: str = ""
     device: str = ""
+    # Optional per-part metadata decoded from the file (BOM part number,
+    # description, alternates, ...), as ordered display-label -> value
+    # pairs. Formats without a BOM leave it empty.
+    props: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

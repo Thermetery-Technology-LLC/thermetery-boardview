@@ -116,6 +116,70 @@ html, body {
 
 #bv-search:focus { border-color: var(--accent); }
 
+/* In-page search suggestions (replaces the native datalist popup). The
+   background is fully opaque and the list is its own composited layer so
+   canvas repaints underneath can never show through it. */
+#bv-suggest {
+  position: absolute;
+  top: 100%;
+  left: 8px;
+  right: 8px;
+  max-height: min(50vh, 340px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  background: #161b3a;
+  border: 1px solid var(--accent);
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.6);
+  z-index: 25;
+  will-change: transform;
+  transform: translateZ(0);
+}
+
+.bv-sugrow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 44px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--bar-border);
+  background: #161b3a;
+  cursor: pointer;
+}
+
+.bv-sugrow:last-child { border-bottom: none; }
+.bv-sugrow:active,
+.bv-sugrow.act { background: #24305e; }
+
+.bv-sugname {
+  font-family: var(--mono);
+  font-size: 15px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bv-sugname b { color: var(--accent); font-weight: normal; }
+
+.bv-sugtype {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--fg-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.bv-sugmore {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  background: #161b3a;
+}
+
 /* ---------- net highlight chip ---------- */
 
 #bv-netchip {
@@ -178,15 +242,61 @@ html, body {
 
 #bv-panel.open { transform: translateY(0); }
 
+/* Minimized: only the header strip stays up so the board is visible;
+   tap the strip (or the chevron) to expand again. */
+#bv-panel.min #bv-panel-tabs,
+#bv-panel.min #bv-panel-body { display: none; }
+#bv-panel.min #bv-panel-min { transform: rotate(180deg); }
+
 #bv-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 8px 14px;
+  border-bottom: 1px solid var(--bar-border);
+  cursor: pointer;
+}
+
+#bv-panel-title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#bv-panel-line {
   display: flex;
   align-items: baseline;
   gap: 10px;
-  padding: 10px 12px 8px 14px;
-  border-bottom: 1px solid var(--bar-border);
+  min-width: 0;
+}
+
+#bv-panel-desc {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--fg);
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#bv-panel-min {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 15px;
+  background: #2a3052;
+  color: var(--fg);
+  font-size: 14px;
+  cursor: pointer;
+  transition: transform 0.18s ease-out;
 }
 
 #bv-panel-ref {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--mono);
   font-size: 17px;
   font-weight: bold;
@@ -345,6 +455,183 @@ html, body {
 }
 
 .bv-pinnet.none { color: #555a80; }
+
+/* info tab: BOM metadata (part number, description, alternates) */
+#bv-panel-info { font-size: 13px; }
+
+.bv-inforow {
+  padding: 8px 14px;
+  border-bottom: 1px solid rgba(42, 48, 82, 0.5);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.bv-infokey {
+  display: block;
+  font-size: 11px;
+  color: var(--fg-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.bv-infoval {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--mono);
+  color: var(--fg);
+  word-break: break-word;
+}
+
+/* ---------- reopen pill (after the panel is closed) ---------- */
+
+#bv-reopen {
+  position: fixed;
+  right: 10px;
+  bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 60vw;
+  height: 36px;
+  padding: 0 14px 0 10px;
+  border: 1px solid var(--accent);
+  border-radius: 18px;
+  background: var(--bar-bg);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 13px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+  cursor: pointer;
+}
+
+#bv-reopen-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- about overlay ---------- */
+
+#bv-about {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(16px + env(safe-area-inset-top, 0px)) 16px
+           calc(16px + env(safe-area-inset-bottom, 0px)) 16px;
+  background: rgba(5, 7, 18, 0.72);
+}
+
+#bv-about-card {
+  position: relative;
+  width: 100%;
+  max-width: 440px;
+  max-height: 100%;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  padding: 22px 20px 18px 20px;
+  background: #141938;
+  border: 1px solid var(--bar-border);
+  border-radius: 14px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+}
+
+#bv-about-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 16px;
+  background: #2a3052;
+  color: var(--fg);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+#bv-about-title {
+  margin-right: 36px;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+#bv-about-version {
+  margin-top: 4px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-dim);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+#bv-about-blurb {
+  margin-top: 12px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--fg);
+}
+
+.bv-about-links {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.bv-about-link {
+  height: 44px;
+  border: 1px solid var(--bar-border);
+  border-radius: 8px;
+  background: #1a2040;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.bv-about-link.primary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.bv-about-link:active { background: #2a3460; }
+
+#bv-about-legal {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--bar-border);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--fg-dim);
+}
+
+#bv-about-legal p + p { margin-top: 8px; }
+
+#bv-about-copyright { color: var(--fg); }
+
+.bv-about-textlinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin-top: 10px;
+}
+
+.bv-about-textlink {
+  padding: 6px 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 12.5px;
+  text-decoration: underline;
+  cursor: pointer;
+}
 
 /* ---------- status line (bottom-left) ---------- */
 
