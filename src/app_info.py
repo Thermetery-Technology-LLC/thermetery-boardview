@@ -21,7 +21,7 @@ from urllib.parse import quote
 APP_NAME = "Thermetery Boardview"
 # Release version. Must match meson.build (the Windows release build reads
 # it there), android versionName and the iOS MARKETING_VERSION.
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 COPYRIGHT = "Copyright © 2026 Thermetery Technology LLC"
 LICENSE_NAME = "GNU Lesser General Public License v3.0 or later"
 LICENSE_SPDX = "LGPL-3.0-or-later"

@@ -104,7 +104,7 @@ android {
         minSdk = 24
         targetSdk = 35
         versionCode = 6
-        versionName = "1.2.0"
+        versionName = "1.3.0"
 
         // Native kernels are prebuilt under src/main/jniLibs/<abi>/ for
         // exactly these two ABIs (16 KB-aligned, NDK r29).
