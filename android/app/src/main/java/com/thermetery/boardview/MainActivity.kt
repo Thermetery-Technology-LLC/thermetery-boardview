@@ -27,6 +27,8 @@ import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -41,6 +43,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  *  - parses on the single Python worker thread, never the UI thread
  *  - key_required: native dialog, 3 retries (mirrors
  *    viewer.py:_load_with_key_prompt), optional remember-on-device
+ *  - Open recent (RecentStore): records every successful open, reopens
+ *    from a persisted SAF grant or an app-private copy, offers to forget
+ *    entries whose source is gone
  */
 class MainActivity : ComponentActivity() {
 
@@ -101,9 +106,16 @@ class MainActivity : ComponentActivity() {
     private var boardOpen = false
     private val tracesInFlight = AtomicBoolean(false)
 
+    private lateinit var recent: RecentStore
+
+    /** Recent-list IO (JSON, copies, provider existence checks) stays off
+     *  both the UI thread and the Python worker, so a slow provider query
+     *  never delays a parse and a parse never delays the list. */
+    private val recentIo: ExecutorService = Executors.newSingleThreadExecutor()
+
     private val openDocument =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            if (uri != null) handleIncomingUri(uri)
+            if (uri != null) handleIncomingUri(uri, RecentStore.Origin(RecentStore.KIND_FILE, uri))
         }
 
     // eM-Test Expert .asc boards are a *directory* of sibling files
@@ -111,7 +123,7 @@ class MainActivity : ComponentActivity() {
     // cannot read siblings.
     private val openDocumentTree =
         registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-            if (uri != null) handleIncomingTree(uri)
+            if (uri != null) handleIncomingTree(uri, RecentStore.Origin(RecentStore.KIND_FOLDER, uri))
         }
 
     // ---------------------------------------------------------------- setup
@@ -119,6 +131,7 @@ class MainActivity : ComponentActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        recent = RecentStore(applicationContext)
 
         webView = WebView(this)
         webView.settings.apply {
@@ -168,9 +181,14 @@ class MainActivity : ComponentActivity() {
         maybeHandleViewIntent(intent)
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        recentIo.shutdown()
+    }
+
     private fun maybeHandleViewIntent(intent: Intent?) {
         if (intent?.action == Intent.ACTION_VIEW) {
-            intent.data?.let { handleIncomingUri(it) }
+            intent.data?.let { handleIncomingUri(it, RecentStore.Origin(RecentStore.KIND_FILE, it)) }
         }
     }
 
@@ -254,6 +272,108 @@ class MainActivity : ComponentActivity() {
             .toString()
     }
 
+    // --------------------------------------------------------- open recent
+
+    /** Any thread. Answers with bv.onRecent({items:[…]}) (contract §3/§4). */
+    fun requestRecentList() {
+        submitRecent { pushRecent() }
+    }
+
+    /** Must run on recentIo. */
+    private fun pushRecent() {
+        val json = try {
+            recent.toJson()
+        } catch (t: Throwable) {
+            Log.e(TAG, "recent list failed", t)
+            "{\"items\":[]}"
+        }
+        runJs("window.bv && bv.onRecent && bv.onRecent($json);")
+    }
+
+    private fun submitRecent(task: () -> Unit) {
+        try {
+            recentIo.execute {
+                try {
+                    task()
+                } catch (t: Throwable) {
+                    Log.e(TAG, "recent task failed", t)
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "recent executor unavailable", t)   // activity finishing
+        }
+    }
+
+    fun removeRecent(id: String) {
+        submitRecent {
+            recent.remove(id)
+            pushRecent()
+        }
+    }
+
+    fun clearRecent() {
+        submitRecent {
+            recent.clear()
+            pushRecent()
+        }
+    }
+
+    /**
+     * Reopen a recent board without the system picker: from the persisted
+     * grant when we still hold it, else from the app-private copy, else a
+     * last try at the raw URI (an "Open with" grant can still be alive in
+     * the same session). Every read failure lands in [recentUnavailable].
+     */
+    fun openRecent(id: String) {
+        submitRecent {
+            val e = recent.get(id)
+            if (e == null) {
+                postError("That board is no longer in the recent list.")
+                pushRecent()
+                return@submitRecent
+            }
+            val uri = e.uri?.let { Uri.parse(it) }
+            val copy = recent.copyFile(e)
+            val folder = e.kind == RecentStore.KIND_FOLDER
+            val (source, origin) = when {
+                uri != null && e.persisted && recent.holdsGrant(uri) ->
+                    uri to RecentStore.Origin(e.kind, uri, recentId = e.id)
+                copy != null ->
+                    Uri.fromFile(copy) to
+                        RecentStore.Origin(e.kind, uri, recentId = e.id, fromCopy = true)
+                uri != null ->
+                    uri to RecentStore.Origin(e.kind, uri, recentId = e.id)
+                else -> {
+                    recentUnavailable(e.id, e.name)
+                    return@submitRecent
+                }
+            }
+            if (folder) handleIncomingTree(source, origin, e.name)
+            else handleIncomingUri(source, origin, e.name)
+        }
+    }
+
+    /** A recent entry's source is gone or no longer readable: say so, and
+     *  offer to forget it (the source may only be temporarily away, e.g.
+     *  an unmounted SD card, so it is not dropped silently). Any thread. */
+    private fun recentUnavailable(id: String, name: String) {
+        postError("Can't reopen $name: it was moved or deleted, or Boardview no longer has access to it.")
+        postStatus("")
+        runOnUiThread {
+            if (isFinishing || isDestroyed) return@runOnUiThread
+            AlertDialog.Builder(this)
+                .setTitle("Board unavailable")
+                .setMessage(
+                    "$name can't be opened — it was moved or deleted, or " +
+                        "Boardview's access to it was revoked.\n\nRemove it from Recent?"
+                )
+                .setPositiveButton("Remove") { _, _ -> removeRecent(id) }
+                .setNegativeButton("Keep", null)
+                .show()
+            requestRecentList()   // refresh the "unavailable" marks
+        }
+    }
+
     /** Called (on a WebView thread) from BoardviewBridge.loadTraces. */
     fun requestTraces() {
         if (!boardOpen) {
@@ -295,10 +415,12 @@ class MainActivity : ComponentActivity() {
      *  with" filter routes Drive, browser downloads and other slow or
      *  remote providers here, and a synchronous query on the main
      *  thread could ANR. */
-    private fun handleIncomingUri(uri: Uri) {
+    private fun handleIncomingUri(uri: Uri, origin: RecentStore.Origin?, knownName: String? = null) {
         PythonRuntime.submit {
             val meta = documentMetadata(uri)
-            val displayName = meta.name
+            // A recent reopen keeps the name it was listed under (the
+            // metadata query of a vanished document only yields a fallback).
+            val displayName = knownName ?: meta.name
             val ext = extensionOf(displayName)
             if (ext == "asc") {
                 // A lone member of a directory-shaped eM-Test set: a
@@ -345,8 +467,12 @@ class MainActivity : ComponentActivity() {
                 f
             } catch (t: Throwable) {
                 Log.e(TAG, "Copy failed for $uri", t)
-                postError("Could not read $displayName: ${t.message}")
-                postStatus("")
+                if (origin?.recentId != null) {
+                    recentUnavailable(origin.recentId, displayName)
+                } else {
+                    postError("Could not read $displayName: ${t.message}")
+                    postStatus("")
+                }
                 return@submit
             }
             val rememberedFormat = rememberedKeyFormat(displayName)
@@ -361,6 +487,7 @@ class MainActivity : ComponentActivity() {
                     // even when no saved key was present.
                     triedRemembered = rememberedFormat != null,
                     rememberFormat = null,
+                    origin = origin,
                 )
             )
         }
@@ -383,15 +510,32 @@ class MainActivity : ComponentActivity() {
      *  parse the cached directory (the dispatcher routes directories to
      *  the ASC parser). Mirrors handleIncomingUri's keep-for-the-session
      *  contract — load_traces re-reads the path lazily. */
-    private fun handleIncomingTree(tree: Uri) {
-        val treeDoc = DocumentFile.fromTreeUri(this, tree)
-        if (treeDoc == null || !treeDoc.isDirectory) {
-            postError("Could not open the picked folder.")
-            return
-        }
-        val dirName = treeDoc.name?.takeIf { it.isNotBlank() } ?: "board"
-        postStatus("Copying $dirName…")
+    private fun handleIncomingTree(tree: Uri, origin: RecentStore.Origin?, knownName: String? = null) {
+        // Resolved on the worker: isDirectory/name are provider queries.
         PythonRuntime.submit {
+            // file:// = a recent entry's app-private copy of the folder.
+            val treeDoc = try {
+                if (tree.scheme == "file") tree.path?.let { DocumentFile.fromFile(File(it)) }
+                else DocumentFile.fromTreeUri(this, tree)
+            } catch (t: Throwable) {
+                Log.w(TAG, "Tree lookup failed for $tree", t)
+                null
+            }
+            val readable = try {
+                treeDoc != null && treeDoc.isDirectory
+            } catch (t: Throwable) {
+                false
+            }
+            if (treeDoc == null || !readable) {
+                if (origin?.recentId != null) {
+                    recentUnavailable(origin.recentId, knownName ?: "The folder")
+                } else {
+                    postError("Could not open the picked folder.")
+                }
+                return@submit
+            }
+            val dirName = knownName ?: treeDoc.name?.takeIf { it.isNotBlank() } ?: "board"
+            postStatus("Copying $dirName…")
             val dest: File = try {
                 val boardsDir = File(cacheDir, "boards").apply { mkdirs() }
                 val dir = File(boardsDir, sanitizeFileName(dirName))
@@ -417,6 +561,11 @@ class MainActivity : ComponentActivity() {
                     copied++
                 }
                 if (copied == 0) {
+                    if (origin?.recentId != null) {
+                        // The remembered folder no longer holds the set.
+                        recentUnavailable(origin.recentId, dirName)
+                        return@submit
+                    }
                     postError(
                         "$dirName contains no .asc files — pick the folder " +
                         "holding the parts/pins/… .asc set."
@@ -427,8 +576,12 @@ class MainActivity : ComponentActivity() {
                 dir
             } catch (t: Throwable) {
                 Log.e(TAG, "Folder copy failed for $tree", t)
-                postError("Could not read $dirName: ${t.message}")
-                postStatus("")
+                if (origin?.recentId != null) {
+                    recentUnavailable(origin.recentId, dirName)
+                } else {
+                    postError("Could not read $dirName: ${t.message}")
+                    postStatus("")
+                }
                 return@submit
             }
             parseBoard(
@@ -440,6 +593,7 @@ class MainActivity : ComponentActivity() {
                     // ASC sets are plaintext; no key slot applies.
                     triedRemembered = true,
                     rememberFormat = null,
+                    origin = origin,
                 )
             )
         }
@@ -492,8 +646,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun sanitizeFileName(name: String): String =
-        name.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+    private fun sanitizeFileName(name: String): String = safeFileName(name)
 
     /** Key slot implied by a filename, before an expensive keyless parse. */
     private fun rememberedKeyFormat(displayName: String): String? =
@@ -514,6 +667,8 @@ class MainActivity : ComponentActivity() {
         val triedRemembered: Boolean,
         /** Non-null: persist the key under this format slot on success. */
         val rememberFormat: String?,
+        /** Non-null: record this source in the recent list on success. */
+        val origin: RecentStore.Origin? = null,
     )
 
     /** May be called from any thread; the Python call runs on the worker. */
@@ -552,6 +707,14 @@ class MainActivity : ComponentActivity() {
             boardOpen = true
             runJs("window.bv && bv.onBoard($result);")
             postStatus("")
+            val origin = attempt.origin
+            if (origin != null) {
+                val format = json.optJSONObject("meta")?.optString("format").orEmpty()
+                submitRecent {
+                    recent.record(origin, attempt.displayName, attempt.file, format)
+                    pushRecent()
+                }
+            }
             return
         }
 

@@ -126,6 +126,8 @@ bv.onBoard(json)    // string or object; replaces current board, fits view
 bv.onTraces(json)   // attaches segments/vias, replaces layer list
 bv.onStatus(text)   // status line ("Parsing…", "Building topology…", "")
 bv.onError(text)    // toast/banner, auto-dismiss
+bv.onRecent(json)   // string or object: the Open recent list (§6a), sent in
+                    // answer to Android.listRecent() and after every change
 ```
 
 ## 4. Kotlin bridge: `window.Android` (shell injects via addJavascriptInterface)
@@ -144,7 +146,17 @@ Android.appInfo()          // SYNC, returns a JSON string for the About page:
 Android.openUrl(url)       // open in the system browser; the shells only
                            // accept https URLs under the project repo
 Android.openLicenses()     // native third-party licenses screen
+Android.listRecent()       // async; shell answers with bv.onRecent(...)
+Android.openRecent(id)     // reopen a recent entry without the system picker;
+                           // same parse / remembered-key flow as a pick
+Android.removeRecent(id)   // forget one entry; shell re-sends bv.onRecent
+Android.clearRecent()      // "Clear recent"; shell re-sends bv.onRecent
 ```
+
+The four recent methods are fire-and-forget on both shells (iOS script
+messages cannot return values). The renderer shows its recent UI only when
+`listRecent` and `openRecent` exist, so the dev harness and older shells
+never show it.
 
 **Renderer dev-harness rule:** when `window.Android` is undefined (desktop
 browser), the renderer must show its own file input + drag-drop that loads a
@@ -264,6 +276,52 @@ how the renderer is developed and tested without Android.
   work. `app/build.gradle.kts` resolves it from `CHAQUOPY_BUILD_PYTHON`,
   else `py -3.13` on Windows, else `python3.13`; nothing machine-specific
   is hardcoded. Full instructions: `android/README.md`.
+
+## 6a. Open recent (both shells)
+
+Desktop parity with `viewer.py`'s File ▸ Open recent / startup launcher.
+
+- **What is recorded:** every board that *parsed successfully* — picker
+  file, picker folder (eM-Test `.asc` set) and "Open with" (Android
+  `ACTION_VIEW`, iOS document hand-off) — at most 10, most recent first.
+  Duplicates collapse: same entry id (a reopen), same source URI / path,
+  or same kind + display name + byte size (the same file reached through
+  two providers). Failed or cancelled opens are not recorded.
+- **`bv.onRecent` payload:**
+  `{"items":[{"id","name","kind":"file"|"folder","format","openedAt","available"}]}`
+  — `format` is `open_board`'s `meta.format`, `openedAt` is epoch
+  milliseconds, `available` is the shell's best guess that the source can
+  still be read (the renderer greys out unavailable rows, like the desktop's
+  missing entries).
+- **Persistence, Android (`RecentStore.kt`):** prefer a persisted SAF read
+  grant (`takePersistableUriPermission`) on the original document/tree URI —
+  always available for picker results; fall back to an app-private copy in
+  `filesDir/recent/<id>/` when the grant is not persistable (typical for
+  `ACTION_VIEW`). Copies are capped at 256 MiB in total (oldest copy-backed
+  entries are evicted). Grants are released when their entry is evicted,
+  removed or cleared. The list is `filesDir/recent.json`.
+- **Persistence, iOS (`RecentStore.swift`):** prefer a security-scoped
+  bookmark (the file picker opens in place, `asCopy: false`; folders were
+  already in place); fall back to an app-private copy under Application
+  Support/recent/<id>/ for Inbox hand-offs. Same caps. The list is
+  Application Support/recent.json; list and copies are excluded from backup.
+- **Reopen:** the shell stages the source into `cacheDir/boards/` exactly like
+  a pick and runs the normal parse flow, so remembered decryption keys apply
+  (`rememberedKeyFormat` from the display name, then the `key_required`
+  retry).
+- **Failure:** when the source is gone, unreadable or its grant was revoked,
+  the shell shows a toast (`bv.onError`) and a native "Board unavailable —
+  Remove it from Recent?" dialog (Remove / Keep). Parse errors of a still
+  readable file are reported as usual and keep the entry.
+- **UI:** the empty screen lists recent boards (with Clear recent); while a
+  board is open the list is behind the toolbar's **Recent** button
+  (`#bv-btn-recent`, after Measure — never before Mirror, see §5). Each
+  row: name, format, last opened; ✕ removes the row. Clear recent needs a
+  second tap within 3 s.
+- **Copy names:** every app-private copy (session copy in `boards/`, recent
+  copy) is named by `safeFileName`: path/reserved characters → `_`, and an
+  empty, `.` or `..` name → `board`, so a hostile provider's display name
+  can never escape the target directory.
 
 ## 7. What v1 explicitly does NOT include
 

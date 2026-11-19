@@ -128,7 +128,15 @@ separate apps with separate data and keys.
   re-reads them; the `.topocache.pkl` sidecar lands next to the copy). The
   `.asc` folder flow mirrors Android: folder picker, `*.asc` members only,
   64-file / 32 MiB caps, fresh copy per pick, single-`.asc` picks get the
-  "Pick the board folder" hint.
+  "Pick the board folder" hint. The file picker opens in place
+  (`asCopy: false`) and the shell copies under the security scope through
+  `NSFileCoordinator`.
+- **Open recent** — `RecentStore.swift` mirrors Android's `RecentStore.kt`
+  (contract §6a): up to 10 successfully opened boards, reopened through a
+  security-scoped bookmark, or through an app-private copy in
+  `Application Support/recent/<id>/` (256 MiB total) for "open with" Inbox
+  hand-offs that cannot be bookmarked. List in
+  `Application Support/recent.json`; list and copies excluded from backup.
 - **Keys** — `key_required` triggers the native dialog (3 attempts, verbatim
   Android strings). Remembering uses `Application Support/keys/<fmt>.txt`,
   excluded from backup (`allowBackup="false"` parity). One platform
