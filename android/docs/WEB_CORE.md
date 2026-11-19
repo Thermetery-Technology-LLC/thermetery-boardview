@@ -64,6 +64,25 @@ preserving pixel-perfect fidelity once the view settles.
   layer (ghosted other-layer parts are only hit when nothing on the
   visible layer is), like the desktop's `_find_component_at`; ALL and
   inner-layer views take any layer.
+- **Measure** — the `Measure` toolbar button (`#bv-btn-measure`) is the
+  desktop's M-key measure mode: taps place two points instead of
+  selecting, a third tap starts a new pair, Escape (hardware keyboard)
+  or the button leaves the mode. Each tap snaps to the nearest pin
+  within 16 CSS px (visible layer first), so a pin-to-pin measurement
+  is exact and labelled `U1.3 → U1.4`. The distance uses
+  `meta.units_per_mm` and the desktop's `_format_distance` wording
+  (mm + mil above 1 mm, µm below; raw units when the scale is
+  unknown). The overlay is drawn after the rotated board content, in
+  final screen space, so its label stays upright. Double-tap zoom is
+  off in this mode (two quick taps on adjacent pins are a pitch
+  measurement); pinch still zooms.
+- **Status line** — composed like the desktop status bar
+  (`viewer.py _update_status`): measure readout first (when measuring),
+  then the layer — tagged `(ratsnest)` while synthetic connectivity is
+  shown, so it is never mistaken for routed copper — then title, part
+  counts per side, net count and warnings. Text pushed through
+  `bv.onStatus` (host progress) replaces the line until the host sends
+  `""` again.
 - **Layer & net highlighting** — dim-alpha for everything else while a
   net is highlighted; bright passes for the selected net's
   pins/segments/vias. Palette matches the desktop viewer.

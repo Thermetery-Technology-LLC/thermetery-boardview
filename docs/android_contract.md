@@ -177,7 +177,10 @@ how the renderer is developed and tested without Android.
   screen point at any rotation. `board_export` bakes no mirror into
   coordinates. User mirror resets on each new board. The Mirror button sits
   between Fit and the rotate buttons so it is visible without scrolling
-  the strip on a 375 px-wide phone.
+  the strip on a 375 px-wide phone. Later buttons (Measure, Keys, About)
+  go after the rotate buttons so Open…Mirror keep fitting 375 px
+  (Mirror's right edge is at 361 px of a 367 px strip; there is no
+  room left before it).
 - Selection panel tabs: canvas pin tap → Net tab (net highlighted); body
   tap → Pins tab. Tapping a Net-tab row jumps to that member (centred on
   the pin, row marked selected) and stays on the Net tab with the same net

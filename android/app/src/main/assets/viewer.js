@@ -78,6 +78,7 @@
   var btnRotL   = document.getElementById("bv-btn-rotl");
   var btnRotR   = document.getElementById("bv-btn-rotr");
   var btnMirror = document.getElementById("bv-btn-mirror");
+  var btnMeasure = document.getElementById("bv-btn-measure");
   var elToolbar = document.getElementById("bv-toolbar");
   var elPanelNet = document.getElementById("bv-panel-net");
   var elPanelInfo = document.getElementById("bv-panel-info");
@@ -115,6 +116,17 @@
   var userMirror = false;  // user "Mirror" toggle; XORed with the BOTTOM auto-mirror
   var hlNet = -1;          // highlighted net index, -1 = none
   var sel = null;          // {ci, pin}  pin = -1 when whole component
+
+  // Measure mode (desktop: M key / Measure button). Taps place points
+  // instead of selecting; a third tap starts a new pair. Points are world
+  // coords, snapped to a pin centre when one is under the finger:
+  // {x, y, label}  label = "U1.3" for a snapped pin, else null.
+  var measureMode = false;
+  var measPts = [];
+
+  // Text the host pushed through bv.onStatus ("Parsing …", "Building
+  // topology…"); while non-empty it replaces the composed status line.
+  var hostStatus = "";
 
   // view.k is always positive; the horizontal mirror is a signed x scale
   // (see kxNow) so every world->screen site stays a plain affine map.
@@ -332,9 +344,11 @@
     var pinX = new Float64Array(nPins), pinY = new Float64Array(nPins);
     var pinNet = new Int32Array(nPins), pinComp = new Int32Array(nPins);
     var pinsByNet = new Array(nets.length);
-    var k = 0;
+    var k = 0, nTop = 0, nBottom = 0;
     for (i = 0; i < comps.length; i++) {
       var cc = comps[i];
+      if (cc.layer === 0) nTop++;
+      else if (cc.layer === 1) nBottom++;
       var pp = cc.pins || [];
       cc.pinStart = k;
       cc.pinCount = pp.length;
@@ -382,7 +396,8 @@
       nets: nets,
       comps: comps,
       bbox: bb,
-      nPins: nPins,
+      nPins: nPins, nTop: nTop, nBottom: nBottom,
+      upm: (meta.units_per_mm > 0) ? meta.units_per_mm : 0,
       pinX: pinX, pinY: pinY, pinNet: pinNet, pinComp: pinComp,
       pinsByNet: pinsByNet, pinOrderX: pinOrderX,
       diag: Math.hypot(bb[2] - bb[0], bb[3] - bb[1]) || 1,
@@ -496,6 +511,8 @@
       sel = null;
       layerIdx = -1;
       userMirror = false;
+      measPts = [];            // world coords of the old board; mode stays
+      hostStatus = "";
       view.rot = 0;
       lastPanel = null;
       closePanel();
@@ -512,10 +529,7 @@
       hideSuggest();
       updateButtons();
       fitView();
-      var nc = board.comps.length, nn = board.nets.length;
-      var warn = (board.meta.warnings && board.meta.warnings.length)
-        ? "  ·  " + board.meta.warnings.length + " warning(s)" : "";
-      setStatus(board.title + "  ·  " + nc + " comps  ·  " + nn + " nets" + warn);
+      updateStatus();
       if (board.meta.warnings && board.meta.warnings.length) {
         alog("board warnings: " + board.meta.warnings.join(" | "));
       }
@@ -552,8 +566,11 @@
       scheduleRender();
     },
 
+    // Host progress text. An empty string hands the line back to the
+    // composed board status (the shells clear it after every job).
     onStatus: function (text) {
-      setStatus(text == null ? "" : String(text));
+      hostStatus = (text == null) ? "" : String(text);
+      updateStatus();
     },
 
     onError: function (text) {
@@ -566,6 +583,36 @@
    * ------------------------------------------------------------------ */
   function setStatus(text) {
     elStatus.textContent = text || "";
+  }
+
+  // Desktop status bar (viewer.py _update_status), narrowed for a phone:
+  // the parts that change with what you are doing come first so a long
+  // title is what gets ellipsised, not the measurement.
+  function layerLabel() {
+    var name = (layerIdx < 0) ? "ALL" : String(board.layers[layerIdx]);
+    // Synthetic MST connectivity must never pass for routed copper.
+    if (showTraces && traces && traces.synthetic) name += " (ratsnest)";
+    return name;
+  }
+
+  function measureStatus() {
+    if (measPts.length >= 2) return "measure: " + formatDistance(measDistance());
+    return measPts.length ? "measure: tap second point" : "measure: tap first point";
+  }
+
+  function updateStatus() {
+    if (hostStatus) { setStatus(hostStatus); return; }
+    if (!board) { setStatus(""); return; }
+    var bits = [];
+    if (measureMode) bits.push(measureStatus());
+    bits.push(layerLabel());
+    bits.push(board.title);
+    bits.push(board.comps.length + " parts (" + board.nTop + " top / " +
+              board.nBottom + " bottom)");
+    bits.push(board.nets.length + " nets");
+    var nw = board.meta.warnings ? board.meta.warnings.length : 0;
+    if (nw) bits.push(nw + " warning" + (nw === 1 ? "" : "s"));
+    setStatus(bits.join("  ·  "));
   }
 
   var toastTimer = 0;
@@ -876,6 +923,158 @@
 
     drawSelection();
     ctx.restore();
+    // Upright overlay: computed in final screen space so the distance
+    // label never turns with the board.
+    drawMeasure();
+  }
+
+  /* ------------------------------------------------------------------ *
+   *  Measurement (desktop CanvasCommon measure mode)
+   * ------------------------------------------------------------------ */
+  var MEAS_COLOR = "#ffd24d";       // desktop MEAS_COLOR
+  var MEAS_SNAP_PX = 16;            // finger -> pin snap radius (CSS px)
+
+  // World -> final screen (CSS px) under the live view, rotation included.
+  function worldToScreen(wx, wy) {
+    return rotAboutCenter(wx * kxNow() + view.tx, -wy * view.k + view.ty, view.rot);
+  }
+
+  function measDistance() {
+    var a = measPts[0], b = measPts[1];
+    return Math.hypot(b.x - a.x, b.y - a.y);
+  }
+
+  // viewer.py _format_distance: mm (3 dp) + mil above 1 mm, um below.
+  // Boards with no known scale report raw file units.
+  function formatDistance(d) {
+    if (!(board && board.upm > 0)) return d.toFixed(1) + " units";
+    var mm = d / board.upm, mil = mm * 39.3701;
+    if (mm >= 1) return mm.toFixed(3) + " mm (" + mil.toFixed(1) + " mil)";
+    return (mm * 1000).toFixed(1) + " µm (" + mil.toFixed(2) + " mil)";
+  }
+
+  function measureTap(sx, sy) {
+    var b = screenToBase(sx, sy);
+    var wx = worldX(b.x), wy = worldY(b.y);
+    // Snap to the nearest pin under the finger, visible layer first, so
+    // pin-to-pin pitch is exact rather than finger-accurate.
+    var radW = MEAS_SNAP_PX / view.k;
+    var onlyLayer = (layerIdx === 0 || layerIdx === 1) ? layerIdx : -1;
+    var pi = nearestPin(wx, wy, radW, onlyLayer);
+    if (pi < 0 && onlyLayer >= 0) pi = nearestPin(wx, wy, radW, -1);
+    var pt = { x: wx, y: wy, label: null };
+    if (pi >= 0) {
+      var c = board.comps[board.pinComp[pi]];
+      var local = pi - c.pinStart;
+      var pname = (c.pins[local] && c.pins[local].name != null)
+        ? String(c.pins[local].name) : String(local + 1);
+      pt = { x: board.pinX[pi], y: board.pinY[pi], label: c.ref + "." + pname };
+    }
+    if (measPts.length >= 2) measPts = [];
+    measPts.push(pt);
+    updateStatus();
+    scheduleRender();
+  }
+
+  function setMeasureMode(on) {
+    measureMode = !!on;
+    measPts = [];
+    if (btnMeasure) btnMeasure.classList.toggle("on", measureMode);
+    updateStatus();
+    scheduleRender();
+  }
+
+  // Does segment a-b touch the axis-aligned rect [x0,x1]x[y0,y1]?
+  // Liang-Barsky clip of the segment's parameter range against the rect.
+  function segHitsRect(a, b, x0, y0, x1, y1) {
+    var t0 = 0, t1 = 1, dx = b.x - a.x, dy = b.y - a.y;
+    var p = [-dx, dx, -dy, dy];
+    var q = [a.x - x0, x1 - a.x, a.y - y0, y1 - a.y];
+    for (var i = 0; i < 4; i++) {
+      if (p[i] === 0) { if (q[i] < 0) return false; continue; }
+      var r = q[i] / p[i];
+      if (p[i] < 0) { if (r > t1) return false; if (r > t0) t0 = r; }
+      else { if (r < t0) return false; if (r < t1) t1 = r; }
+    }
+    return true;
+  }
+
+  function drawMeasure() {
+    if (!measureMode || !measPts.length || !board) return;
+    var pts = [];
+    for (var i = 0; i < measPts.length; i++) {
+      pts.push(worldToScreen(measPts[i].x, measPts[i].y));
+    }
+    ctx.lineCap = "round";
+    if (pts.length === 2) {
+      // dark halo keeps the line legible over pins and traces alike
+      ctx.strokeStyle = "#000000";
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      ctx.lineTo(pts[1].x, pts[1].y);
+      ctx.stroke();
+      ctx.strokeStyle = MEAS_COLOR;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    for (i = 0; i < pts.length; i++) {
+      ctx.fillStyle = MEAS_COLOR;
+      ctx.strokeStyle = "#000000";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(pts[i].x, pts[i].y, 4, 0, 6.2832);
+      ctx.fill();
+      ctx.stroke();
+    }
+    if (pts.length === 2) {
+      var text = formatDistance(measDistance());
+      var a = measPts[0].label, bl = measPts[1].label;
+      if (a && bl) text = a + " → " + bl + "   " + text;
+      ctx.font = "bold 12px Consolas, monospace";
+      var tw = ctx.measureText(text).width;
+      // Place the pill (half-extent tw/2+5 by 10 px) so it clears the line:
+      // beside the midpoint along the normal, else past either end along
+      // the line (a ~300 px label beside a short vertical pin-to-pin line
+      // fits on neither side of a phone screen). Each candidate is clamped
+      // on screen first and kept only if the clamped pill misses the line.
+      var hw = tw / 2 + 5, hh = 10;
+      var dx = pts[1].x - pts[0].x, dy = pts[1].y - pts[0].y;
+      var len = Math.max(Math.hypot(dx, dy), 1);
+      var ux = dx / len, uy = dy / len;
+      var offN = Math.abs(uy) * hw + Math.abs(ux) * hh + 8;   // along normal
+      var offU = Math.abs(ux) * hw + Math.abs(uy) * hh + 8;   // along line
+      var mx = (pts[0].x + pts[1].x) / 2, my = (pts[0].y + pts[1].y) / 2;
+      var spots = [
+        [mx - uy * offN, my + ux * offN], [mx + uy * offN, my - ux * offN],
+        [pts[1].x + ux * offU, pts[1].y + uy * offU],
+        [pts[0].x - ux * offU, pts[0].y - uy * offU]
+      ];
+      var lx = 0, ly = 0;
+      for (var si = 0; si < spots.length; si++) {
+        lx = Math.min(Math.max(spots[si][0], hw + 4), cssW - hw - 4);
+        ly = Math.min(Math.max(spots[si][1], hh + 4), cssH - hh - 4);
+        if (!segHitsRect(pts[0], pts[1], lx - hw - 2, ly - hh - 2,
+                         lx + hw + 2, ly + hh + 2)) break;
+        if (si === spots.length - 1) {   // nothing clears: first spot
+          lx = Math.min(Math.max(spots[0][0], hw + 4), cssW - hw - 4);
+          ly = Math.min(Math.max(spots[0][1], hh + 4), cssH - hh - 4);
+        }
+      }
+      ctx.fillStyle = "rgba(20,20,20,0.92)";
+      ctx.strokeStyle = MEAS_COLOR;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.rect(lx - tw / 2 - 5, ly - 10, tw + 10, 20);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = MEAS_COLOR;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(text, lx, ly);
+      ctx.textAlign = "left";
+    }
+    ctx.lineCap = "butt";
   }
 
   // Screen rect of a component bbox, normalised so w >= 0 even when the x
@@ -1049,13 +1248,11 @@
     return hitTestWorld(wx, wy, -1);
   }
 
-  function hitTestWorld(wx, wy, onlyLayer) {
-    var radW = TAP_RADIUS_CSS / view.k;
-    var rad2 = radW * radW;
-
-    // Nearest pin within the tap radius. Pin x coordinates are sorted once
-    // during ingestion, so only the exact x window needs a distance check.
-    var bestPin = -1, bestD2 = rad2;
+  // Nearest pin within radW (world units) of (wx, wy), or -1. Pin x
+  // coordinates are sorted once during ingestion, so only the exact x
+  // window needs a distance check.
+  function nearestPin(wx, wy, radW, onlyLayer) {
+    var bestPin = -1, bestD2 = radW * radW;
     var px = board.pinX, py = board.pinY;
     var order = board.pinOrderX;
     var minX = wx - radW, maxX = wx + radW;
@@ -1077,6 +1274,13 @@
         bestPin = i;
       }
     }
+    return bestPin;
+  }
+
+  function hitTestWorld(wx, wy, onlyLayer) {
+    var radW = TAP_RADIUS_CSS / view.k;
+    var bestPin = nearestPin(wx, wy, radW, onlyLayer);
+    var i;
     if (bestPin >= 0) {
       var pci = board.pinComp[bestPin];
       var pc = board.comps[pci];
@@ -1637,6 +1841,9 @@
 
   function handleTap(x, y) {
     if (!board) return;
+    // Measure mode owns single taps. No double-tap zoom here: two quick
+    // taps on neighbouring pins are a pitch measurement, not a zoom.
+    if (measureMode) { measureTap(x, y); return; }
     var now = performance.now();
     var dx = x - lastTapX, dy = y - lastTapY;
     if (now - lastTapT < 320 && dx * dx + dy * dy < 1600) {
@@ -1706,6 +1913,18 @@
 
   btnFit.addEventListener("click", function () {
     fitView();
+  });
+
+  if (btnMeasure) btnMeasure.addEventListener("click", function () {
+    if (!board) return;
+    setMeasureMode(!measureMode);
+  });
+  // Hardware keyboards (Chromebooks, tablets with keyboards, the dev
+  // harness): Escape leaves measure mode, as on the desktop.
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && measureMode && document.activeElement !== elSearch) {
+      setMeasureMode(false);
+    }
   });
 
   function rotateBy(delta) {
@@ -1877,6 +2096,9 @@
       btnLayer.classList.add("on");
     }
     btnTraces.classList.toggle("on", showTraces);
+    if (btnMeasure) btnMeasure.classList.toggle("on", measureMode);
+    // Layer and traces state both feed the status line ("TOP (ratsnest)").
+    updateStatus();
     if (btnMirror) {
       // .on reflects the EFFECTIVE mirror (BOTTOM auto-mirror XOR user toggle)
       var mir = isMirrored();
@@ -2084,6 +2306,9 @@
         layerIdx: layerIdx, userMirror: userMirror, mirrored: isMirrored(),
         sel: sel ? { ci: sel.ci, pin: sel.pin } : null, hlNet: hlNet,
         activeTab: activeTab,
+        measureMode: measureMode,
+        measPts: measPts.map(function (p) { return { x: p.x, y: p.y, label: p.label }; }),
+        status: elStatus.textContent,
         w2s: function (wx, wy) {           // world -> final screen (CSS px), live view
           return rotAboutCenter(wx * kxNow() + view.tx, -wy * view.k + view.ty, view.rot);
         }
