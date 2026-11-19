@@ -390,8 +390,11 @@ html, body {
 }
 
 .bv-netrow {
-  display: flex;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr) auto;
+  align-content: start;
+  align-items: baseline;
+  gap: 2px 12px;
   padding: 7px 14px;
   border-bottom: 1px solid rgba(42, 48, 82, 0.5);
   cursor: pointer;
@@ -400,7 +403,7 @@ html, body {
 
 .bv-netrow:active { background: #1a2040; }
 .bv-netrow.sel { background: #16224a; }
-.bv-netrow.more { color: var(--fg-dim); cursor: default; }
+.bv-netrow.more { display: block; color: var(--fg-dim); cursor: default; }
 
 .bv-netref {
   flex: 0 0 76px;
@@ -417,6 +420,37 @@ html, body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.bv-netlayer {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: bold;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+}
+.bv-netlayer.top { color: #5b8fff; }
+.bv-netlayer.bot { color: #ff6b5b; }
+
+/* secondary line: device + footprint, dimmer, ellipsised */
+.bv-netsub {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 12px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--fg-dim);
+  opacity: 0.8;
+}
+.bv-netdev, .bv-netshape {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.bv-netdev { flex: 0 1 auto; max-width: 55%; }
+.bv-netshape { flex: 1 1 0; opacity: 0.8; }
 
 .bv-netempty {
   padding: 16px 14px;

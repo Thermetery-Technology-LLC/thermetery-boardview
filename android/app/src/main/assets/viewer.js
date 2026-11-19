@@ -1463,6 +1463,40 @@
     elPanelInfo.appendChild(frag);
   }
 
+  // Natural pin order, like app_common.pin_sort_key: numeric first, then
+  // BGA-style alpha+digits(+suffix), then anything else lexicographically.
+  function pinSortKey(name) {
+    var n = String(name);
+    if (/^[+-]?\d+$/.test(n)) return [0, "", parseInt(n, 10), ""];
+    var m = /^([A-Z]+)(\d+)([A-Z]*)$/.exec(n.toUpperCase());
+    if (m) return [1, m[1], parseInt(m[2], 10), m[3]];
+    return [2, n, 0, ""];
+  }
+  function cmpKey(a, b) {
+    for (var i = 0; i < 4; i++) {
+      if (a[i] < b[i]) return -1;
+      if (a[i] > b[i]) return 1;
+    }
+    return 0;
+  }
+  function netMembersSorted(net) {
+    var src = board.pinsByNet[net] || [];
+    var keyed = new Array(src.length);
+    for (var i = 0; i < src.length; i++) {
+      var pi = src[i], c = board.comps[board.pinComp[pi]];
+      var p = c.pins[pi - c.pinStart];
+      keyed[i] = { pi: pi, ref: String(c.ref),
+        k: pinSortKey(p && p.name != null ? p.name : (pi - c.pinStart + 1)) };
+    }
+    keyed.sort(function (a, b) {
+      if (a.ref !== b.ref) return a.ref < b.ref ? -1 : 1;
+      return cmpKey(a.k, b.k) || (a.pi - b.pi);
+    });
+    var out = new Array(keyed.length);
+    for (i = 0; i < keyed.length; i++) out[i] = keyed[i].pi;
+    return out;
+  }
+
   function buildNetTab(net) {
     if (!elPanelNet) return;
     elPanelNet.textContent = "";
@@ -1473,13 +1507,17 @@
       elPanelNet.appendChild(empty);
       return;
     }
-    var members = board.pinsByNet[net] || [];
-    // Pin indices are appended component-by-component during ingestion, so
-    // distinct component runs give the part count without an all-pin scan.
-    var nParts = 0, lastCi = -1;
+    // Desktop order: refdes, then natural pin order. Sorted copy so
+    // board.pinsByNet stays in ingestion order.
+    var members = netMembersSorted(net);
+    // Distinct component runs give the part count (members are grouped by
+    // ref after sorting) and the top/bottom pin split.
+    var nParts = 0, lastCi = -1, nTopPins = 0, nBotPins = 0;
     for (var i = 0; i < members.length; i++) {
       var memberCi = board.pinComp[members[i]];
       if (memberCi !== lastCi) { nParts++; lastCi = memberCi; }
+      var ml = board.comps[memberCi].layer;
+      if (ml === 0) nTopPins++; else if (ml === 1) nBotPins++;
     }
     var frag = document.createDocumentFragment();
     var head = document.createElement("div");
@@ -1490,7 +1528,8 @@
     var hm = document.createElement("span");
     hm.className = "bv-netheadmeta";
     hm.textContent = members.length + " pin" + (members.length === 1 ? "" : "s") +
-      "  ·  " + nParts + " part" + (nParts === 1 ? "" : "s");
+      "  ·  " + nParts + " part" + (nParts === 1 ? "" : "s") +
+      "  ·  " + nTopPins + " top / " + nBotPins + " bottom";
     head.appendChild(hn); head.appendChild(hm);
     frag.appendChild(head);
     var nRows = Math.min(members.length, MAX_NET_ROWS);
@@ -1511,7 +1550,30 @@
       var rp = document.createElement("span");
       rp.className = "bv-netpin";
       rp.textContent = pname;
-      row.appendChild(rr); row.appendChild(rp);
+      var rl = document.createElement("span");
+      rl.className = "bv-netlayer " + (c.layer === 1 ? "bot" : "top");
+      rl.textContent = c.layer === 1 ? "B" : (c.layer === 0 ? "T" : "?");
+      rl.title = c.layer === 1 ? "BOTTOM" : "TOP";
+      row.appendChild(rr); row.appendChild(rp); row.appendChild(rl);
+      var dev = c.device ? String(c.device) : "";
+      var shp = c.shape ? String(c.shape) : "";
+      if (dev || shp) {
+        var sub = document.createElement("span");
+        sub.className = "bv-netsub";
+        if (dev) {
+          var sd = document.createElement("span");
+          sd.className = "bv-netdev";
+          sd.textContent = dev;
+          sub.appendChild(sd);
+        }
+        if (shp) {
+          var ss = document.createElement("span");
+          ss.className = "bv-netshape";
+          ss.textContent = shp;
+          sub.appendChild(ss);
+        }
+        row.appendChild(sub);
+      }
       return row;
     }
     function moreRow(count) {

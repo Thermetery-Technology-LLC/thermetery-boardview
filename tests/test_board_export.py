@@ -130,3 +130,19 @@ class BoardExportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_device_and_shape_exported_only_when_present(self):
+        model = BoardModel(
+            components={
+                "R1": Component("R1", 0.0, 0.0, "TOP", 0.0, "R0402", "10K"),
+                "R2": Component("R2", 5.0, 0.0, "TOP", 0.0, "", ""),
+            },
+            signals={"GND": [("R1", "1")]},
+            shapes={},
+        )
+        with mock.patch.object(board_export, "parse_board", return_value=model):
+            exported = json.loads(board_export._open_board("fixture.cad", None))
+        r1, r2 = exported["components"]
+        self.assertEqual((r1["device"], r1["shape"]), ("10K", "R0402"))
+        self.assertNotIn("device", r2)
+        self.assertNotIn("shape", r2)
