@@ -38,7 +38,19 @@ follow-up commit. The warnings list surfaces this fact to the viewer
 so users know net browsing won't return results yet.
 
 Verified against Lenovo Thinkpad T480 NM-B501R10 (MD5
-6983e8afd4af43829ec210c1eef0136f).
+6983e8afd4af43829ec210c1eef0136f) and Lenovo ThinkPad T470p LCFC
+NM-B071 (MD5 facab74b19f8de47ad7f1987551170ac). The two differ in
+three ways, each resolved from the file's own data rather than a
+per-board table:
+
+  * Region offsets: T470p's net table / R3 chips / master pool sit
+    ~2.5 MB earlier. `_resolve_layout` keeps the T480 offsets when
+    they validate, else `_autodetect_layout` finds the pool start by
+    matching R3 footprint names against master names.
+  * Cap-section layer byte: +20 on T480, +9 on T470p
+    (`_scan_cap_section_layers` picks the one that agrees with R1).
+  * Pin frame: T470p uses T480's connector frame for every chip
+    (`_choose_pin_frame` picks whichever lands more pins on pads).
 """
 
 from dataclasses import dataclass, field
@@ -85,18 +97,20 @@ _R1_SIGNATURE = b"\xb8\x0b\x00\x00\x2c\x01\x00\x00"
 # 8 zero bytes followed by 0x01, then a Pascal-prefixed footprint name.
 _MASTER_SIGNATURE = b"\x00\x00\x00\x00\x00\x00\x00\x00\x01"
 
-# Where to start scanning for the master footprint pool. This is stable
-# across the Compal/Lenovo files we've verified (T480). If future Compal
-# sub-variants shift this we'll need to autodetect by walking backwards
-# from end-of-file looking for the first master signature.
+# T480 (NM-B501) layout: where the master footprint pool starts, the
+# Region 3 chip-record range and the net-name table range. These are
+# tried first and kept only if they validate (see `_resolve_layout`);
+# other boards (T470p NM-B071 puts the same regions ~2.5 MB earlier)
+# fall through to `_autodetect_layout`, which finds them from the data.
 _MASTER_POOL_START_HINT = 0xbd0000
-
-# Region 3 chip-record search range. R3 records cluster in this offset
-# range on T480; the lower bound skips early aux tables and the upper
-# bound stops before the net-name table region. Sized generously since
-# the scan is cheap (byte-level skip-ahead).
 _R3_SEARCH_START = 0xa00000
 _R3_SEARCH_END = 0xc00000
+_NET_SEARCH_START = 0xa00000
+_NET_SEARCH_END = 0xc40000
+
+# A layout is accepted when at least this fraction of its R3 chips name
+# the same footprint (packed slot 3) as the master their fp_id points at.
+_LAYOUT_MIN_FP_AGREEMENT = 0.9
 
 # Sentinel byte found at chip after-Pascal +44 in ALL valid Compal R3
 # records. The bytes immediately following vary by chip type (ICs use
@@ -110,6 +124,11 @@ _CHIP_PRELUDE_SENTINEL = 0x01
 # outline placeholders for TB_TP1..TB_TP6. Filtering them keeps the
 # component count meaningful.
 _TEST_POINT_FP_IDS = frozenset({235, 236, 237, 238, 239, 240})
+
+# chip_class values (see `_Chip.chip_class`) for test points and
+# fiducials — the autodetected path's structural stand-in for the
+# T480-only `_TEST_POINT_FP_IDS`.
+_PINLESS_MARKER_CLASSES = frozenset({18, 29})
 
 # Refdes patterns that are pin sub-records nested inside larger chips,
 # NOT standalone components. The `H`, `FL`, `FLJ` prefixes are pin-name
@@ -163,6 +182,7 @@ class _Chip:
     device_value: str   # slot 0 — passive value or "*" for ICs
     tolerance: str      # slot 1 — tolerance %
     part_code: str      # slot 4 — supplier / part code, e.g. "SD000012RYT"
+    fp_name: str        # slot 3 — footprint name (== master[fp_id-1].name)
     # Per-pin records walked from the chip's inline pin list. Each tuple
     # is `(master_pin_idx, display_pin_number, pascal_pin_name)`.
     # `master_pin_idx` = (ptr - first_ptr) // 8 — selects the pin's
@@ -178,9 +198,32 @@ class _Chip:
 # Master pool scanner
 # --------------------------------------------------------------------------
 
-def _scan_master_pool(data: bytes) -> Dict[int, _Master]:
-    """Walk the master footprint pool starting near
-    `_MASTER_POOL_START_HINT`. Returns ``{master_idx -> _Master}``.
+def _master_candidates(data: bytes, start: int) -> List[Tuple[int, int, str]]:
+    """Every `(offset, name_len, name)` from `start` to EOF whose 9-byte
+    master signature is followed by a plausible Pascal ASCII name. A
+    match skips past its name; anything else advances one byte."""
+    raw: List[Tuple[int, int, str]] = []
+    i = max(0, start)
+    end = len(data) - 12
+    while i < end:
+        i = data.find(_MASTER_SIGNATURE, i, end + 9)
+        if i < 0 or i >= end:
+            break
+        L = data[i+9]
+        if 4 <= L <= 80:
+            name_bytes = data[i+10:i+10+L]
+            if all(0x20 <= b < 0x7f for b in name_bytes):
+                raw.append((i, L, name_bytes.decode("ascii", errors="replace")))
+                i = i + 10 + L
+                continue
+        i += 1
+    return raw
+
+
+def _scan_master_pool(data: bytes, start: int = _MASTER_POOL_START_HINT
+                      ) -> Dict[int, _Master]:
+    """Walk the master footprint pool starting at `start`. Returns
+    ``{master_idx -> _Master}``.
 
     Each master record begins with the 9-byte signature
     ``00 00 00 00 00 00 00 00 01`` followed by a Pascal-prefixed
@@ -205,19 +248,7 @@ def _scan_master_pool(data: bytes) -> Dict[int, _Master]:
     # coincidentally-ASCII run), but those are rare and rejected by
     # the implicit constraint that fp_id -> master_idx must yield a
     # sane footprint name for real chips.
-    raw: List[Tuple[int, int, str]] = []
-    i = _MASTER_POOL_START_HINT
-    while i < len(data) - 12:
-        if data[i:i+9] == _MASTER_SIGNATURE:
-            L = data[i+9]
-            if 4 <= L <= 80:
-                name_bytes = data[i+10:i+10+L]
-                if all(0x20 <= b < 0x7f for b in name_bytes):
-                    name = name_bytes.decode("ascii", errors="replace")
-                    raw.append((i, L, name))
-                    i = i + 10 + L
-                    continue
-        i += 1
+    raw = _master_candidates(data, start)
     # Pass 2: extract pin coords with proper body bounds.
     masters: List[_Master] = []
     for k, (off, L, name) in enumerate(raw):
@@ -430,21 +461,28 @@ def _scan_r1_layers_py(data: bytes) -> Dict[str, int]:
 # Cap-section layer overlay
 # --------------------------------------------------------------------------
 
-def _scan_cap_section_layers(data: bytes) -> Dict[str, int]:
+# Where the cap-section trailer keeps the layer byte, in preference
+# order: T480 puts it at +20 (0x02 TOP / 0x0b BOTTOM) past an 11-char
+# part code; T470p at +9 (0x02 TOP / 0x09 BOTTOM), like Gigabyte.
+_CAP_LAYER_OFFSETS = (20, 9)
+
+
+def _scan_cap_section_layers(data: bytes,
+                             r1: Optional[Dict[str, int]] = None
+                             ) -> Dict[str, int]:
     """For each cap-section chip record (the historical `0x01 +
     Pascal-dev + Pascal-fp` markers found by tvw_parser._chip_headers),
-    return ``{refdes -> layer_byte}`` from the cap-section trailer at
-    `after_off + 20`.
+    return ``{refdes -> layer_byte}`` from the cap-section trailer.
+    0x02 means TOP; anything else BOTTOM (see `_determine_layer`).
 
-    On Compal/Lenovo files: 0x02 -> TOP, 0x0b -> BOTTOM. Verified
-    across 20 chips that overlap between cap-section and R1 — all 20
-    agree on layer.
+    The trailer offset differs between boards, so when `r1` is given
+    each offset in `_CAP_LAYER_OFFSETS` is scored against the Region 1
+    flags of chips found in both, and the best one wins (ties and no
+    overlap keep the first, +20). On T480 all 20 overlapping chips
+    agree at +20; on T470p all 323 agree at +9 while +20 is always 0.
     """
     # Re-use the existing Gigabyte chip-header finder; the marker
-    # pattern is the same on both variants. The trailer LAYOUT differs
-    # (Gigabyte: layer byte at +9; Compal: layer byte at +20 past a
-    # leading 11-char "SE...T" / "SGA...T" / "SH...T" part code), and
-    # we use the Compal offset here.
+    # pattern is the same on both variants.
     #
     # `_chip_headers` is the accelerated wrapper: it prefers the C port
     # in tvw_native.dll and falls back to the pure-Python
@@ -454,14 +492,25 @@ def _scan_cap_section_layers(data: bytes) -> Dict[str, int]:
     # file produces, so there is no truncation risk on this path.
     from .parsers.tvw_parser import _chip_headers, _decode_refdes
     chips = _chip_headers(data)
-    out: Dict[str, int] = {}
+    firsts: Dict[str, int] = {}
     for c in chips:
         rd = _decode_refdes(data, c["off"])
-        if rd and rd not in out:
-            after = c["after_off"]
-            if after + 21 <= len(data):
-                out[rd] = data[after + 20]
-    return out
+        if rd and rd not in firsts:
+            firsts[rd] = c["after_off"]
+
+    def layers_at(k: int) -> Dict[str, int]:
+        return {rd: data[after + k] for rd, after in firsts.items()
+                if after + k < len(data)}
+
+    best_k, best_score = _CAP_LAYER_OFFSETS[0], -1
+    if r1:
+        for k in _CAP_LAYER_OFFSETS:
+            lay = layers_at(k)
+            score = sum(1 for rd, b in lay.items() if rd in r1
+                        and (b == 0x02) == (r1[rd] == 0))
+            if score > best_score:
+                best_k, best_score = k, score
+    return layers_at(best_k)
 
 
 # --------------------------------------------------------------------------
@@ -470,7 +519,10 @@ def _scan_cap_section_layers(data: bytes) -> Dict[str, int]:
 
 def _enumerate_r3_chips(
     data: bytes,
-    masters: Dict[int, _Master],
+    masters: Optional[Dict[int, _Master]],
+    lo: int = _R3_SEARCH_START,
+    hi: int = _R3_SEARCH_END,
+    skip_fp_ids: frozenset = _TEST_POINT_FP_IDS,
 ) -> Dict[str, _Chip]:
     """Find all Region 3 chip records. Returns ``{refdes -> _Chip}``.
 
@@ -486,11 +538,15 @@ def _enumerate_r3_chips(
         2_000_000 file units; the actual board span is ±1,000,000).
       * fp_id (after-Pascal +28..+31) must resolve to a master record
         (master_idx = fp_id - 1 in range).
-      * fp_id must not be in `_TEST_POINT_FP_IDS`.
+      * fp_id must not be in `skip_fp_ids` (T480's test-point ids).
+
+    ``masters=None`` skips the master lookup (fp_id must just be >= 1);
+    layout autodetection uses that to collect chips before it knows
+    where the master pool starts.
     """
     chips: Dict[str, _Chip] = {}
-    i = _R3_SEARCH_START
-    end = min(_R3_SEARCH_END, len(data) - 64)
+    i = max(0, lo)
+    end = min(hi, len(data) - 64)
     while i < end:
         # Cheapest pre-check first: byte at i must be 0.
         if data[i] != 0:
@@ -545,10 +601,10 @@ def _enumerate_r3_chips(
             i += 1
             continue
         master_idx = fp_id - 1
-        if master_idx not in masters:
+        if (master_idx not in masters) if masters is not None else master_idx < 0:
             i += 1
             continue
-        if fp_id in _TEST_POINT_FP_IDS:
+        if fp_id in skip_fp_ids:
             i += 1
             continue
         # Walk the 5 packed Pascal strings starting at after-Pascal +45.
@@ -580,7 +636,7 @@ def _enumerate_r3_chips(
         if not slots_ok:
             i += 1
             continue
-        device_value, tolerance, _tol_dup, _fp_name_dup, part_code = slots
+        device_value, tolerance, _tol_dup, fp_name, part_code = slots
         # After slot 4: 4 zero bytes, then uint32 pin_count, uint32
         # mystery flag, 4 more bytes, then the pin-record run.
         if sp + 16 > len(data):
@@ -617,7 +673,7 @@ def _enumerate_r3_chips(
                 Y=Y, X=X, f0=f0, f1=f1, f2=f2, f3=f3,
                 rot=rot, fp_id=fp_id, chip_class=chip_class,
                 device_value=device_value, tolerance=tolerance,
-                part_code=part_code, pins=pin_records,
+                part_code=part_code, fp_name=fp_name, pins=pin_records,
             )
         # Skip past the Pascal so we don't re-match its bytes when
         # walking forward. The chip's full data block extends further
@@ -660,18 +716,51 @@ def _determine_layer(
 # Canonical pin-position transform
 # --------------------------------------------------------------------------
 
+# Pin-frame conventions (see `_pin_local_to_world`).
+_FRAME_T480 = "t480"        # canonical; connectors (class 17) special-cased
+_FRAME_UNIFORM = "uniform"  # T470p: the connector frame for every chip
+
+
+def _frame_negated(chip: _Chip, layer: str, frame: str) -> bool:
+    """Whether (dy, dx) is negated before the BOTTOM dx-flip."""
+    if frame == _FRAME_UNIFORM:
+        # T470p NM-B071: verified on every asymmetric part with a full
+        # pad match (SOT/QFN/SON/connectors, all 4 rotations x both
+        # layers). This is also the T480 connector rule, which T480
+        # never exercised for TOP-side 90/270 placements.
+        return (layer == "TOP") == (chip.rot in (0, 180))
+    if chip.chip_class == 17:
+        # Connector pin frame matches canonical only for the two
+        # "natural" cases: rot in {0, 180} on BOTTOM. In all other
+        # placements (TOP-side, or rotated 90/270 on BOTTOM) the
+        # frame is inverted. Empirically verified on T480:
+        #   rot=0   BOTTOM   no-negate  (JTAG2, JSIM1, JWLAN1, JFAN1)
+        #   rot=180 BOTTOM   no-negate  (JLCD1, JPWR1, JDDR1, JDDR2)
+        #   rot=0   TOP      negate     (JTP1)
+        #   rot=180 TOP      negate     (JKBL1, J41)
+        #   rot=90  BOTTOM   negate     (JLAN1, JSD1, JUSB1, JHDMI1)
+        #   rot=270 BOTTOM   negate     (JDOCK1, JUSBC1, JHP1, JSPK1)
+        return not (chip.rot in (0, 180) and layer == "BOTTOM")
+    return False
+
+
 def _pin_local_to_world(
     chip: _Chip, A: int, B: int, layer: str,
+    frame: str = _FRAME_T480, negate: Optional[bool] = None,
 ) -> Tuple[int, int]:
     """Convert master-local (A, B) to world (Y, X) for the given chip's
     rotation and layer. Returns ``(world_Y, world_X)``.
 
     See TVW_FORMAT.html section 11 for the derivation. Verified on
-    216 supervised chips across all 4 rotations × both layers with
+    216 supervised chips across all 4 rotations x both layers with
     residual = 0 against actual pad world coords for non-connector
     chips. Class-17 (connector) chips require the additional negation
-    step below, verified on JKBL1 (38/38 pins), JTAG2 (8/8 pins),
-    plus pin-1 spot-checks on JLAN1, JDOCK1, JHDMI1, JUSBC1 and J41.
+    step in `_frame_negated`, verified on JKBL1 (38/38 pins), JTAG2
+    (8/8 pins), plus pin-1 spot-checks on JLAN1, JDOCK1, JHDMI1,
+    JUSBC1 and J41.
+
+    `frame` picks the board's convention (`_choose_pin_frame`);
+    `negate`, when given, is that convention's answer precomputed.
     """
     rot = chip.rot
     if   rot ==   0: dy, dx = -A, -B
@@ -679,20 +768,10 @@ def _pin_local_to_world(
     elif rot == 180: dy, dx =  A,  B
     elif rot == 270: dy, dx =  B, -A
     else:            dy, dx =  A,  B  # unusual rotation, accept verbatim
-    if chip.chip_class == 17:
-        # Connector pin frame matches canonical only for the two
-        # "natural" cases: rot ∈ {0, 180} on BOTTOM. In all other
-        # placements (TOP-side, or rotated 90°/270° on BOTTOM) the
-        # frame is inverted and we negate (dy, dx) BEFORE the BOTTOM
-        # dx-flip. Empirically verified:
-        #   rot=0   BOTTOM   no-negate  (JTAG2, JSIM1, JWLAN1, JFAN1)
-        #   rot=180 BOTTOM   no-negate  (JLCD1, JPWR1, JDDR1, JDDR2)
-        #   rot=0   TOP      negate     (JTP1)
-        #   rot=180 TOP      negate     (JKBL1, J41)
-        #   rot=90  BOTTOM   negate     (JLAN1, JSD1, JUSB1, JHDMI1)
-        #   rot=270 BOTTOM   negate     (JDOCK1, JUSBC1, JHP1, JSPK1)
-        if not (rot in (0, 180) and layer == "BOTTOM"):
-            dy, dx = -dy, -dx
+    if negate is None:
+        negate = _frame_negated(chip, layer, frame)
+    if negate:
+        dy, dx = -dy, -dx
     if layer == "BOTTOM":
         dx = -dx
     return (chip.f2 + dy, chip.f3 + dx)
@@ -721,140 +800,208 @@ def _world_to_chip_local(
 # Net-name table
 # --------------------------------------------------------------------------
 
-def _scan_net_names(data: bytes) -> List[str]:
-    """Locate and decode the net-name table.
+NetTable = Tuple[int, int, List[str]]   # (header offset, end offset, names)
+
+
+def _scan_net_names(data: bytes, lo: int = _NET_SEARCH_START,
+                    hi: int = _NET_SEARCH_END) -> List[str]:
+    """Locate and decode the net-name table; returns its names (or [])."""
+    found = _locate_net_table(data, lo, hi)
+    return found[2] if found else []
+
+
+def _locate_net_table(data: bytes, lo: int = _NET_SEARCH_START,
+                      hi: int = _NET_SEARCH_END) -> Optional[NetTable]:
+    """Find the first net-name table whose header starts in [lo, hi).
 
     The table has a 2-uint32 header where the count is repeated twice,
     followed by `count` Pascal-prefixed net names. On T480 it lives at
-    `0xb384fe` (count = 2774), but to be sub-variant-tolerant we scan
-    for the duplicated-count + valid-first-Pascal signature.
+    `0xb384fe` (count = 2774); T470p has it at `0x9048b4` (2762).
 
-    Returns a list where index `net_id` -> net name. **Net IDs are
-    0-based**: ``nets[0]`` is the first Pascal-prefixed name in the
-    table (verified against ground-truth from BoardViewer.exe — GND
-    at index 45, USBCOMP at 1446, PECI at 1330, etc.).
+    Index `net_id` -> net name. **Net IDs are 0-based**: ``nets[0]`` is
+    the first Pascal-prefixed name in the table (verified against
+    ground-truth from BoardViewer.exe — GND at index 45, USBCOMP at
+    1446, PECI at 1330, etc.).
 
     Dispatches to a numpy-accelerated prefilter when available; falls
-    back to the pure-Python reference loop (`_scan_net_names_py`) on any
-    error or when numpy is absent.
+    back to the pure-Python reference loop on any error or when numpy
+    is absent. Both return the lowest-offset table that validates.
     """
+    hi = min(hi, len(data) - 16)
+    if hi <= lo:
+        return None
     if _NUMPY_OK:
         try:
-            return _scan_net_names_np(data)
+            return _locate_net_table_np(data, lo, hi)
         except Exception:
             pass
-    return _scan_net_names_py(data)
+    return _locate_net_table_py(data, lo, hi)
 
 
-def _scan_net_names_np(data: bytes) -> List[str]:
-    """numpy fast path for `_scan_net_names`.
+def _walk_net_table(data: bytes, i: int) -> Optional[NetTable]:
+    """Validate a candidate header at `i` (count already checked to be
+    duplicated and in range) by walking every Pascal name."""
+    count = int.from_bytes(data[i:i+4], "little")
+    L = data[i+8]
+    if not (1 <= L <= 80):
+        return None
+    if not all(0x20 <= b < 0x7f for b in data[i+9:i+9+L]):
+        return None
+    nets: List[str] = []
+    pos = i + 8
+    for _ in range(count):
+        if pos >= len(data):
+            return None
+        sL = data[pos]
+        if sL > 200 or pos + 1 + sL > len(data):
+            return None
+        sb = data[pos+1:pos+1+sL]
+        if not all(0x20 <= b < 0x7f for b in sb):
+            return None
+        nets.append(sb.decode("ascii"))
+        pos += 1 + sL
+    return i, pos, nets
 
-    The reference loop scans every offset in the candidate region but
-    only does meaningful work where the duplicated-count header
-    (``c1 == c2`` with ``100 <= c1 <= 20000``) holds. We vector-locate
-    those header offsets (a couple thousand vs ~2.6M positions), then
-    run the identical Pascal-string walk on each, in ascending offset
-    order, returning the first that validates — exactly as the reference
-    loop does.
-    """
-    n = len(data)
-    lo = 0xa00000
-    hi = min(0xc40000, n - 16)
-    if hi <= lo:
-        return _scan_net_names_py(data)
-    a = _np.frombuffer(data, dtype=_np.uint8)
 
-    # Contiguous-slice little-endian u32 over the region (cheap; no
-    # fancy-indexing). c1 = u32 @ i, c2 = u32 @ i+4.
-    b0 = a[lo:hi].astype(_np.uint32)
-    b1 = a[lo + 1:hi + 1].astype(_np.uint32)
-    b2 = a[lo + 2:hi + 2].astype(_np.uint32)
-    b3 = a[lo + 3:hi + 3].astype(_np.uint32)
-    c1 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
-    d0 = a[lo + 4:hi + 4].astype(_np.uint32)
-    d1 = a[lo + 5:hi + 5].astype(_np.uint32)
-    d2 = a[lo + 6:hi + 6].astype(_np.uint32)
-    d3 = a[lo + 7:hi + 7].astype(_np.uint32)
-    c2 = d0 | (d1 << 8) | (d2 << 16) | (d3 << 24)
-    mask = (c1 == c2) & (c1 >= 100) & (c1 <= 20000)
-    cand = (_np.nonzero(mask)[0] + lo).tolist()  # ascending
-
-    for i in cand:
-        c1v = int.from_bytes(data[i:i + 4], "little")
-        # Verify the first Pascal name parses as ASCII text.
-        L = data[i + 8]
-        if not (1 <= L <= 80):
+def _locate_net_table_np(data: bytes, lo: int, hi: int) -> Optional[NetTable]:
+    """numpy prefilter: view the region as little-endian uint32 at each
+    of the 4 byte alignments, so `c1 == c2` is just "element equals its
+    successor". Memory stays ~(hi - lo) bytes per alignment instead of
+    eight full-width uint32 copies, which matters for whole-file scans
+    on phones."""
+    cand: List[int] = []
+    for k in range(4):
+        start = lo + k
+        n = (hi + 4 - start) // 4 + 1          # covers headers < hi
+        if n < 2 or start + 4 * n > len(data):
+            n = (len(data) - start) // 4
+        if n < 2:
             continue
-        first = data[i + 9:i + 9 + L]
-        if not all(0x20 <= b < 0x7f for b in first):
-            continue
-        nets: List[str] = []
-        pos = i + 8
-        ok = True
-        for _ in range(c1v):
-            if pos >= len(data):
-                ok = False
-                break
-            sL = data[pos]
-            if sL > 200 or pos + 1 + sL > len(data):
-                ok = False
-                break
-            sb = data[pos + 1:pos + 1 + sL]
-            if not all(0x20 <= b < 0x7f for b in sb):
-                ok = False
-                break
-            nets.append(sb.decode("ascii"))
-            pos += 1 + sL
-        if ok and len(nets) == c1v:
-            return nets
-    return []
+        u = _np.frombuffer(data, dtype="<u4", count=n, offset=start)
+        c1 = u[:-1]
+        m = (c1 == u[1:]) & (c1 >= 100) & (c1 <= 20000)
+        offs = _np.nonzero(m)[0] * 4 + start
+        cand.extend(int(o) for o in offs[offs < hi])
+    for i in sorted(cand):
+        found = _walk_net_table(data, i)
+        if found:
+            return found
+    return None
 
 
-def _scan_net_names_py(data: bytes) -> List[str]:
-    """Pure-Python reference implementation of `_scan_net_names`.
-
-    Kept as the canonical fallback; the numpy fast path above must
-    produce an identical result.
-    """
-    # Scan a likely region. The table sits roughly between the chip
-    # tables and the master pool on Compal/Lenovo files.
-    for i in range(0xa00000, min(0xc40000, len(data) - 16), 1):
+def _locate_net_table_py(data: bytes, lo: int, hi: int) -> Optional[NetTable]:
+    """Pure-Python reference implementation of `_locate_net_table`."""
+    for i in range(lo, hi):
         c1 = int.from_bytes(data[i:i+4], "little")
         if not (100 <= c1 <= 20000):
             continue
-        c2 = int.from_bytes(data[i+4:i+8], "little")
-        if c1 != c2:
+        if c1 != int.from_bytes(data[i+4:i+8], "little"):
             continue
-        # Verify the first Pascal name parses as ASCII text.
-        L = data[i+8]
-        if not (1 <= L <= 80):
-            continue
-        first = data[i+9:i+9+L]
-        if not all(0x20 <= b < 0x7f for b in first):
-            continue
-        # Try to walk all `count` Pascal strings; if any fails the
-        # candidate is not the real net table. The file uses 0-based
-        # net_ids (verified) — no leading placeholder entry.
-        nets: List[str] = []
-        pos = i + 8
-        ok = True
-        for _ in range(c1):
-            if pos >= len(data):
-                ok = False
-                break
-            sL = data[pos]
-            if sL > 200 or pos + 1 + sL > len(data):
-                ok = False
-                break
-            sb = data[pos+1:pos+1+sL]
-            if not all(0x20 <= b < 0x7f for b in sb):
-                ok = False
-                break
-            nets.append(sb.decode("ascii"))
-            pos += 1 + sL
-        if ok and len(nets) == c1:
-            return nets
-    return []
+        found = _walk_net_table(data, i)
+        if found:
+            return found
+    return None
+
+
+# --------------------------------------------------------------------------
+# Layout resolution — where the master pool, R3 chips and net table live
+# --------------------------------------------------------------------------
+
+@dataclass(slots=True)
+class _Layout:
+    masters: Dict[int, _Master]
+    chips: Dict[str, _Chip]
+    nets: List[str]
+    detected: bool          # False = the T480 constants validated
+
+
+def _fp_key(name: str) -> str:
+    """Footprint name as R3 slot 3 spells it: bottom-side masters carry
+    a `_B` suffix there that the chip record omits."""
+    return name[:-2] if name.endswith("_B") else name
+
+
+def _fp_agreement(chips: Dict[str, _Chip], masters: Dict[int, _Master]
+                  ) -> float:
+    """Fraction of chips whose slot-3 footprint name matches the master
+    their fp_id selects. Chips with a `?` placeholder name don't count."""
+    named = [c for c in chips.values() if c.fp_name not in ("", "?")]
+    if not named:
+        return 0.0
+    ok = sum(1 for c in named
+             if (m := masters.get(c.fp_id - 1)) is not None
+             and _fp_key(m.name) == _fp_key(c.fp_name))
+    return ok / len(named)
+
+
+def _resolve_layout(data: bytes) -> Optional[_Layout]:
+    """Use the T480 offsets when they validate; otherwise find the
+    regions from the data. None when neither works."""
+    masters = _scan_master_pool(data, _MASTER_POOL_START_HINT)
+    legacy: Optional[_Layout] = None
+    if masters:
+        chips = _enumerate_r3_chips(data, masters)
+        if chips:
+            legacy = _Layout(masters, chips, _scan_net_names(data), False)
+            if (len(chips) >= 10 and _fp_agreement(chips, masters)
+                    >= _LAYOUT_MIN_FP_AGREEMENT):
+                return legacy
+    # Fixed offsets didn't validate: detect, but never do worse than
+    # the pre-autodetect behaviour (whatever the fixed offsets found).
+    return _autodetect_layout(data) or legacy
+
+
+def _autodetect_layout(data: bytes) -> Optional[_Layout]:
+    """Find the regions without fixed offsets.
+
+    Observed order (T480 and T470p): net-name table, then Region 3 chip
+    records, then the master footprint pool running to EOF.
+
+      1. Locate the net table anywhere in the file.
+      2. Collect R3 chip records after it without the master check
+         (each carries fp_id and, in slot 3, its footprint's name).
+      3. Every master-signature candidate after the table is a possible
+         pool entry (R3 records themselves contain the signature, so
+         there are false ones). Each chip votes for pool start index
+         `j - (fp_id - 1)` for every candidate `j` named like its
+         footprint; the true start collects ~every chip's vote.
+      4. Rescan the pool from that start (identical to the fixed-offset
+         path) and keep R3 chips that sit before it.
+    """
+    net = _locate_net_table(data, 0, len(data))
+    after_nets = net[1] if net else 0
+    loose = _enumerate_r3_chips(data, None, after_nets, len(data),
+                                skip_fp_ids=frozenset())
+    if not loose:
+        return None
+    raw = _master_candidates(data, after_nets)
+    by_name: Dict[str, List[int]] = {}
+    for j, (_off, _L, name) in enumerate(raw):
+        by_name.setdefault(_fp_key(name), []).append(j)
+    votes: Dict[int, int] = {}
+    for c in loose.values():
+        for j in by_name.get(_fp_key(c.fp_name), ()):
+            s = j - (c.fp_id - 1)
+            if s >= 0:
+                votes[s] = votes.get(s, 0) + 1
+    if not votes:
+        return None
+    start_idx = max(votes, key=lambda s: (votes[s], -s))
+    if votes[start_idx] < 0.5 * len(loose):
+        return None
+    pool_off = raw[start_idx][0]
+    masters = _scan_master_pool(data, pool_off)
+    chips = _enumerate_r3_chips(data, masters, after_nets, pool_off,
+                                skip_fp_ids=frozenset())
+    if not chips or _fp_agreement(chips, masters) < _LAYOUT_MIN_FP_AGREEMENT:
+        return None
+    # T480's hard-coded test-point fp_ids don't carry over; drop the
+    # same thing structurally: test points / fiducials whose master has
+    # no pins (they'd only render as placeholder boxes).
+    chips = {rd: c for rd, c in chips.items()
+             if masters[c.fp_id - 1].pin_locals
+             or c.chip_class not in _PINLESS_MARKER_CLASSES}
+    return _Layout(masters, chips, net[2] if net else [], True)
 
 
 # --------------------------------------------------------------------------
@@ -1007,6 +1154,31 @@ def _build_pad_index_py(data: bytes) -> Dict[Tuple[int, int], int]:
     return index
 
 
+def _pad_hits(chip: _Chip, master: _Master, layer: str, negate: bool,
+              pad_index: Dict[Tuple[int, int], int]) -> int:
+    return sum(1 for A, B in master.pin_locals
+               if _pin_local_to_world(chip, A, B, layer, negate=negate)
+               in pad_index)
+
+
+def _choose_pin_frame(chips: Dict[str, _Chip], masters: Dict[int, _Master],
+                      layers: Dict[str, str],
+                      pad_index: Dict[Tuple[int, int], int]) -> str:
+    """The board's pin-frame convention: whichever lands more pins on
+    pads. Symmetric parts score the same either way, so asymmetric ones
+    decide; the T480 convention wins ties."""
+    score = {_FRAME_T480: 0, _FRAME_UNIFORM: 0}
+    for rd, c in chips.items():
+        m = masters[c.fp_id - 1]
+        if not m.pin_locals:
+            continue
+        for frame in score:
+            neg = _frame_negated(c, layers[rd], frame)
+            score[frame] += _pad_hits(c, m, layers[rd], neg, pad_index)
+    return (_FRAME_UNIFORM if score[_FRAME_UNIFORM] > score[_FRAME_T480]
+            else _FRAME_T480)
+
+
 # --------------------------------------------------------------------------
 # Public entry point
 # --------------------------------------------------------------------------
@@ -1036,27 +1208,32 @@ def parse(path: Path, data: Optional[bytes] = None) -> BoardModel:
         data = Path(path).read_bytes()
     model = BoardModel()
 
-    masters = _scan_master_pool(data)
-    if not masters:
+    layout = _resolve_layout(data)
+    if layout is None:
         model.warnings = [
-            f"{Path(path).name}: master footprint pool not found at "
-            f"the expected offset. File may use a different Compal "
+            f"{Path(path).name}: could not locate the master footprint "
+            f"pool and chip records. File may use a different Compal "
             f"sub-variant; please report on GitHub issue #1."
         ]
         return model
+    masters, r3_chips, nets = layout.masters, layout.chips, layout.nets
 
     r1 = _scan_r1_layers(data)
-    cap_layers = _scan_cap_section_layers(data)
-    r3_chips = _enumerate_r3_chips(data, masters)
-    nets = _scan_net_names(data)
+    cap_layers = _scan_cap_section_layers(data, r1)
     pad_index = _build_pad_index(data)
+
+    layers = {rd: _determine_layer(rd, masters[c.fp_id - 1].name, r1,
+                                   cap_layers)
+              for rd, c in r3_chips.items()}
+    frame = _choose_pin_frame(r3_chips, masters, layers, pad_index)
 
     n_no_master_pins = 0
     n_pin_net_hits = 0
     n_pin_net_misses = 0
     for refdes, chip in r3_chips.items():
         master = masters[chip.fp_id - 1]
-        layer = _determine_layer(refdes, master.name, r1, cap_layers)
+        layer = layers[refdes]
+        negate = _frame_negated(chip, layer, frame)
         shape_name = f"_compal_{master.name}_{refdes}"
         shape = Shape(name=shape_name)
 
@@ -1072,7 +1249,8 @@ def parse(path: Path, data: Optional[bytes] = None) -> BoardModel:
 
         if master.pin_locals:
             for pin_idx, (A, B) in enumerate(master.pin_locals):
-                world_Y, world_X = _pin_local_to_world(chip, A, B, layer)
+                world_Y, world_X = _pin_local_to_world(
+                    chip, A, B, layer, negate=negate)
                 dx, dy = _world_to_chip_local(chip, world_Y, world_X)
                 pin_disp, _pin_name = by_master_idx.get(
                     pin_idx, (pin_idx + 1, str(pin_idx + 1)))
