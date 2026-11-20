@@ -90,6 +90,10 @@ jobs:
 
           Get-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "release\SHA256SUMS.txt")
 
+      - name: Test installer associations
+        run: |
+          & .\packaging\test_windows_associations.ps1 -Installer (Join-Path $env:GITHUB_WORKSPACE "release\ThermeteryBoardviewer-${{ steps.version.outputs.value }}-windows-x64-setup.exe")
+
       - name: Upload Windows release bundle
         uses: actions/upload-artifact@v4
         with:
@@ -100,4 +104,84 @@ jobs:
             release/SHA256SUMS.txt
           if-no-files-found: error
           compression-level: 0
+          retention-days: 30
+
+  build-android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - name: Build APKs
+        run: gradle -p android :app:assembleDebug :app:assembleRelease --console=plain
+      - name: Label APKs and generate checksums
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          mkdir -p release
+          cp android/app/build/outputs/apk/debug/app-debug.apk "release/ThermeteryBoardviewer-$RELEASE_VERSION-android-debug-signed.apk"
+          cp android/app/build/outputs/apk/release/app-release-unsigned.apk "release/ThermeteryBoardviewer-$RELEASE_VERSION-android-unsigned.apk"
+          (cd release && sha256sum *.apk > SHA256SUMS-android.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Android-APK-builds
+          path: |
+            release/*.apk
+            release/SHA256SUMS-android.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  build-ios:
+    name: iOS unsigned IPA
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Fetch dependencies
+        run: bash ios/fetch_deps.sh
+      - name: Build iOS device app
+        working-directory: ios
+        run: |
+          xcodegen generate
+          xcodebuild -project Boardview.xcodeproj -scheme Boardview \
+            -configuration Release -destination generic/platform=iOS \
+            -derivedDataPath "$RUNNER_TEMP/boardview-derived" \
+            CODE_SIGNING_ALLOWED=NO build
+      - name: Package unsigned sideload IPA
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          mkdir -p "$RUNNER_TEMP/ipa/Payload" release
+          cp -R "$RUNNER_TEMP/boardview-derived/Build/Products/Release-iphoneos/Boardview.app" "$RUNNER_TEMP/ipa/Payload/"
+          app="$RUNNER_TEMP/ipa/Payload/Boardview.app"
+          find "$app" -type f -print0 | while IFS= read -r -d '' f; do
+            if file "$f" | grep -q 'Mach-O'; then codesign --remove-signature "$f" 2>/dev/null || true; fi
+          done
+          find "$app" -name _CodeSignature -type d -prune -exec rm -rf {} +
+          find "$app" -name embedded.mobileprovision -type f -delete
+          (cd "$RUNNER_TEMP/ipa" && zip -qry "$GITHUB_WORKSPACE/release/ThermeteryBoardviewer-$RELEASE_VERSION-ios-unsigned.ipa" Payload)
+          (cd release && shasum -a 256 *.ipa > SHA256SUMS-ios.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iOS-unsigned-IPA
+          path: |
+            release/*.ipa
+            release/SHA256SUMS-ios.txt
+          if-no-files-found: error
           retention-days: 30

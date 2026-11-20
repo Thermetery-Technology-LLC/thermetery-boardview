@@ -103,7 +103,7 @@ android {
         applicationId = "com.thermetery.boardview"
         minSdk = 24
         targetSdk = 35
-        versionCode = 6
+        versionCode = 7
         versionName = "1.3.0"
 
         // Native kernels are prebuilt under src/main/jniLibs/<abi>/ for

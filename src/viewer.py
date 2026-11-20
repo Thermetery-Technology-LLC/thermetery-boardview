@@ -1384,6 +1384,37 @@ def _pick_startup_board() -> Optional[Path]:
         root.destroy()
 
 
+class _StartupKeyPrompt(tk.Tk):
+    """Temporary dialog owner before the viewer window exists."""
+
+    _load_with_key_prompt = ViewerApp._load_with_key_prompt
+    _maybe_save_key = ViewerApp._maybe_save_key
+
+
+def _prompt_for_startup_key(path: Path, *, fmt: str, initial_error=None):
+    root = _StartupKeyPrompt()
+    root.withdraw()
+    try:
+        return root._load_with_key_prompt(path, fmt=fmt,
+                                          initial_error=initial_error)
+    finally:
+        root.destroy()
+
+
+def _load_startup_board(path: Path, key=None, *, smoke_test=False):
+    try:
+        board = parse_board(path, key=key)
+    except FZKeyError as exc:
+        if smoke_test:
+            raise
+        return _prompt_for_startup_key(path, fmt="fz", initial_error=exc)
+    if not smoke_test and getattr(board, "key_required", False):
+        better = _prompt_for_startup_key(path, fmt="xzz")
+        if better is not None:
+            board = better
+    return board
+
+
 def main() -> None:
     # Print a one-time perf warning if any of the native DLLs are missing.
     # Cheap (a couple of LoadLibrary attempts) and visible *before* the
@@ -1416,7 +1447,8 @@ def main() -> None:
         _remember_dir(board_path)
 
     try:
-        board = parse_board(board_path, key=args.key)
+        board = _load_startup_board(board_path, key=args.key,
+                                    smoke_test=args.smoke_test)
     except FZKeyError as exc:
         import sys
         print(f"[viewer] {exc}", file=sys.stderr)
@@ -1424,6 +1456,8 @@ def main() -> None:
               "or open the file from the GUI to be prompted.", file=sys.stderr)
         sys.exit(2)
 
+    if board is None:  # The user cancelled the key dialog.
+        return
     app = ViewerApp(board, board_path=board_path)
     if args.smoke_test:
         app.update_idletasks()
