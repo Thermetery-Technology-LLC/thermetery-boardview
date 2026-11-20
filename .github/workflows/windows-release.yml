@@ -90,6 +90,10 @@ jobs:
 
           Get-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "release\SHA256SUMS.txt")
 
+      - name: Test installer associations
+        run: |
+          & .\packaging\test_windows_associations.ps1 -Installer (Join-Path $env:GITHUB_WORKSPACE "release\ThermeteryBoardviewer-${{ steps.version.outputs.value }}-windows-x64-setup.exe")
+
       - name: Upload Windows release bundle
         uses: actions/upload-artifact@v4
         with:

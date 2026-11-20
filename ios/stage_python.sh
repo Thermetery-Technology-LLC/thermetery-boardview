@@ -101,6 +101,11 @@ echo "Staged app_packages from $(basename "$WHEEL_DIR")"
 
 # Embed: stdlib into python/lib, every .so (stdlib + numpy) converted into a
 # signed framework with a .fwork marker (Python-Apple-support's helper).
+# Xcode omits these variables when building without signing. BeeWare's helper
+# requires both; use ad-hoc signatures for the intermediate build in that case.
+# The sideload IPA packaging step removes those signatures again.
+export EXPANDED_CODE_SIGN_IDENTITY="${EXPANDED_CODE_SIGN_IDENTITY:--}"
+export EXPANDED_CODE_SIGN_IDENTITY_NAME="${EXPANDED_CODE_SIGN_IDENTITY_NAME:-Ad Hoc}"
 source "$PROJECT_DIR/vendor/Python.xcframework/build/utils.sh"
 install_python vendor/Python.xcframework app_packages
 
